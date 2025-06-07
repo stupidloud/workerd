@@ -7,8 +7,8 @@ PYODIDE_VERSIONS = [
         "sha256": "fbda450a64093a8d246c872bb901ee172a57fe594c9f35bba61f36807c73300d",
     },
     {
-        "version": "0.27.5",
-        "sha256": "2e16b053eaa0b1f5761e027e6fc54003567a34e8327bba9a918407accaa4d7c8",
+        "version": "0.27.7",
+        "sha256": "9bc8f127db6c590b191b9aee754022cb41b1a36c7bac233776c11c5ecb541be8",
     },
 ]
 
@@ -26,10 +26,7 @@ _package_lockfiles = [
 
 # The below is a list of pyodide-lock.json files for each package bundle version that we support.
 # Each of these gets embedded in the workerd and EW binary.
-#
-# The key is the `packages` field in pythonSnapshotRelease and the value is the sha256 checksum of
-# the lock file. Used by both workerd and edgeworker to download the package lockfiles.
-PYTHON_LOCKFILES = {meta["info"]["tag"]: meta["info"]["lockfile_hash"] for meta in _package_lockfiles}
+PYTHON_LOCKFILES = [meta["info"] for meta in _package_lockfiles]
 
 # Used to generate the import tests, where we import each top level name from each package and check
 # that it doesn't fail.
@@ -60,8 +57,8 @@ def make_bundle_version_info(versions):
         result[name] = entry
     dev = result["development"]
 
-    # Uncomment to test with development = 0.27.5
-    # dev["real_pyodide_version"] = "0.27.5"
+    # Uncomment to test with development = 0.27.7
+    # dev["real_pyodide_version"] = "0.27.7"
     result["development"] = result[dev["real_pyodide_version"]] | dev
     return result
 
@@ -71,8 +68,8 @@ BUNDLE_VERSION_INFO = make_bundle_version_info([
         "pyodide_version": "0.26.0a2",
         "pyodide_date": "2024-03-01",
         "packages": "20240829.4",
-        "backport": "59",
-        "integrity": "sha256-WPeyKwddTIsG33hWCVCcb3In3BHd1b9TlQbp2g+Q8Kc=",
+        "backport": "63",
+        "integrity": "sha256-xrG65VJvao9GYH07C73Uq2jA9DW7O1DP16fiZo36Xq0=",
         "flag": "pythonWorkers",
         "emscripten_version": "3.1.52",
         "python_version": "3.12.1",
@@ -81,17 +78,17 @@ BUNDLE_VERSION_INFO = make_bundle_version_info([
         "baseline_snapshot_hash": "d13ce2f4a0ade2e09047b469874dacf4d071ed3558fec4c26f8d0b99d95f77b5",
     },
     {
-        "name": "0.27.5",
-        "pyodide_version": "0.27.5",
+        "name": "0.27.7",
+        "pyodide_version": "0.27.7",
         "pyodide_date": "2025-01-16",
         "packages": "20250324.1",
-        "backport": "27",
-        "integrity": "sha256-0DOMRRWGt67ZuvDKINiyfZyDz7yzDoUd2Vcug5Fhv7Y=",
+        "backport": "2",
+        "integrity": "sha256-04qtaf3jr6q7mixWrpeASgYzTW1WHb9NEILBGl8M9hk=",
         "flag": "pythonWorkers20250116",
         "emscripten_version": "3.1.58",
         "python_version": "3.12.7",
-        "baseline_snapshot": "baseline-cb0651452.bin",
-        "baseline_snapshot_integrity": "sha256-fckrUGeHN443uCivfJC11F924K8g9HAy8RtyaGHmzW8=",
+        "baseline_snapshot": "baseline-86f117585.bin",
+        "baseline_snapshot_integrity": "sha256-hvEXWFaRDWq6wKavdbLDoj6nNuXSowpbftTICgK0Cg0=",
         "baseline_snapshot_hash": "TODO",
     },
     {
