@@ -4,7 +4,6 @@ import {
   mountWorkerFiles,
 } from 'pyodide-internal:setupPackages';
 import {
-  finishSnapshotSetup,
   maybeCollectSnapshot,
   maybeRestoreSnapshot,
   preloadDynamicLibs,
@@ -106,6 +105,7 @@ export async function loadPyodide(
     }
     Module.setUnsafeEval(UnsafeEval);
     Module.setGetRandomValues(getRandomValues);
+    Module.setSetTimeout(setTimeout, clearTimeout, setInterval, clearInterval);
 
     entropyMountFiles(Module);
     await enterJaegerSpan('load_packages', () =>
@@ -129,8 +129,6 @@ export async function loadPyodide(
       finalizeBootstrap(Module);
     }
     const pyodide = Module.API.public_api;
-
-    finishSnapshotSetup(pyodide);
 
     validatePyodideVersion(pyodide);
 

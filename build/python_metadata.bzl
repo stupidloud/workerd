@@ -1,5 +1,16 @@
+load("@aspect_bazel_lib//lib:base64.bzl", "base64")
+load("@aspect_bazel_lib//lib:strings.bzl", "chr")
 load("//:build/python/packages_20240829_4.bzl", "PACKAGES_20240829_4")
-load("//:build/python/packages_20250324_1.bzl", "PACKAGES_20250324_1")
+load("//:build/python/packages_20250606.bzl", "PACKAGES_20250606")
+
+def _chunk(data, length):
+    return [data[i:i + length] for i in range(0, len(data), length)]
+
+def hex_to_b64(hex):
+    s = ""
+    for chunk in _chunk(hex, 2):
+        s += chr(int(chunk, 16))
+    return "sha256-" + base64.encode(s)
 
 PYODIDE_VERSIONS = [
     {
@@ -7,8 +18,8 @@ PYODIDE_VERSIONS = [
         "sha256": "fbda450a64093a8d246c872bb901ee172a57fe594c9f35bba61f36807c73300d",
     },
     {
-        "version": "0.27.5",
-        "sha256": "2e16b053eaa0b1f5761e027e6fc54003567a34e8327bba9a918407accaa4d7c8",
+        "version": "0.27.7",
+        "sha256": "9bc8f127db6c590b191b9aee754022cb41b1a36c7bac233776c11c5ecb541be8",
     },
 ]
 
@@ -21,15 +32,12 @@ PYODIDE_VERSIONS = [
 # first.
 _package_lockfiles = [
     PACKAGES_20240829_4,
-    PACKAGES_20250324_1,
+    PACKAGES_20250606,
 ]
 
 # The below is a list of pyodide-lock.json files for each package bundle version that we support.
 # Each of these gets embedded in the workerd and EW binary.
-#
-# The key is the `packages` field in pythonSnapshotRelease and the value is the sha256 checksum of
-# the lock file. Used by both workerd and edgeworker to download the package lockfiles.
-PYTHON_LOCKFILES = {meta["info"]["tag"]: meta["info"]["lockfile_hash"] for meta in _package_lockfiles}
+PYTHON_LOCKFILES = [meta["info"] for meta in _package_lockfiles]
 
 # Used to generate the import tests, where we import each top level name from each package and check
 # that it doesn't fail.
@@ -50,49 +58,65 @@ verify_no_packages_were_removed()
 def _bundle_id(*, pyodide_version, pyodide_date, backport, **_kwds):
     return "%s_%s_%s" % (pyodide_version, pyodide_date, backport)
 
-def make_bundle_version_info(versions):
+def _add_integrity(entry):
+    for key, value in entry.items():
+        if not key.endswith("_hash"):
+            continue
+        newkey = key.removesuffix("_hash") + "_integrity"
+        entry[newkey] = hex_to_b64(value)
+
+def _make_bundle_version_info(versions):
     result = {}
     for entry in versions:
         name = entry["name"]
-        if entry["name"] != "development":
+        if name != "development":
             entry["id"] = _bundle_id(**entry)
         entry["feature_flags"] = [entry["flag"]]
+        if "packages" in entry:
+            entry["packages"] = entry["packages"]["info"]["tag"]
+        _add_integrity(entry)
         result[name] = entry
     dev = result["development"]
 
-    # Uncomment to test with development = 0.27.5
-    # dev["real_pyodide_version"] = "0.27.5"
+    # Uncomment to test with development = 0.27.7
+    # dev["real_pyodide_version"] = "0.27.7"
     result["development"] = result[dev["real_pyodide_version"]] | dev
     return result
 
-BUNDLE_VERSION_INFO = make_bundle_version_info([
+BUNDLE_VERSION_INFO = _make_bundle_version_info([
     {
         "name": "0.26.0a2",
         "pyodide_version": "0.26.0a2",
         "pyodide_date": "2024-03-01",
-        "packages": "20240829.4",
-        "backport": "59",
-        "integrity": "sha256-WPeyKwddTIsG33hWCVCcb3In3BHd1b9TlQbp2g+Q8Kc=",
+        "packages": PACKAGES_20240829_4,
+        "backport": "63",
+        "integrity": "sha256-xrG65VJvao9GYH07C73Uq2jA9DW7O1DP16fiZo36Xq0=",
         "flag": "pythonWorkers",
         "emscripten_version": "3.1.52",
         "python_version": "3.12.1",
         "baseline_snapshot": "baseline-d13ce2f4a.bin",
-        "baseline_snapshot_integrity": "sha256-0Tzi9KCt4uCQR7Rph02s9NBx7TVY/sTCb40Lmdlfd7U=",
         "baseline_snapshot_hash": "d13ce2f4a0ade2e09047b469874dacf4d071ed3558fec4c26f8d0b99d95f77b5",
+        "numpy_snapshot": "ew-py-package-snapshot_numpy-v2.bin",
+        "numpy_snapshot_hash": "5055deb53f404afacba73642fd10e766b123e661847e8fdf4f1ec92d8ca624dc",
+        "fastapi_snapshot": "ew-py-package-snapshot_fastapi-v2.bin",
+        "fastapi_snapshot_hash": "d204956a074cd74f7fe72e029e9a82686fcb8a138b509f765e664a03bfdd50fb",
     },
     {
-        "name": "0.27.5",
-        "pyodide_version": "0.27.5",
+        "name": "0.27.7",
+        "pyodide_version": "0.27.7",
         "pyodide_date": "2025-01-16",
-        "packages": "20250324.1",
-        "backport": "27",
-        "integrity": "sha256-0DOMRRWGt67ZuvDKINiyfZyDz7yzDoUd2Vcug5Fhv7Y=",
+        "packages": PACKAGES_20250606,
+        "backport": "2",
+        "integrity": "sha256-04qtaf3jr6q7mixWrpeASgYzTW1WHb9NEILBGl8M9hk=",
         "flag": "pythonWorkers20250116",
         "emscripten_version": "3.1.58",
         "python_version": "3.12.7",
-        "baseline_snapshot": "baseline-cb0651452.bin",
-        "baseline_snapshot_integrity": "sha256-fckrUGeHN443uCivfJC11F924K8g9HAy8RtyaGHmzW8=",
-        "baseline_snapshot_hash": "TODO",
+        "baseline_snapshot": "baseline-59fa311f4.bin",
+        "baseline_snapshot_hash": "59fa311f4af0bb28477e2fa17f54dc254ec7fa6f02617b832b141854e44bd621",
+        "numpy_snapshot": "package_snapshot_numpy-429b1174f.bin",
+        "numpy_snapshot_hash": "429b1174f9c0d73f9c845007c60595c0a80141b440c080c862568f9d2351dcbb",
+        "fastapi_snapshot": "package_snapshot_fastapi-23337a32b.bin",
+        "fastapi_snapshot_hash": "23337a032bb78f8c2d1abb9439a9c16f56c50130b67aff6bf82b78c896d9a1cc",
     },
     {
         "real_pyodide_version": "0.26.0a2",
@@ -101,6 +125,5 @@ BUNDLE_VERSION_INFO = make_bundle_version_info([
         "pyodide_date": "dev",
         "id": "dev",
         "flag": "pythonWorkersDevPyodide",
-        "baseline_snapshot_hash": "92859211804cd350f9e14010afad86e584bdd017dc7acfd94709a87f3220afae",
     },
 ])

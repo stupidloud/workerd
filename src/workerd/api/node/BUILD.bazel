@@ -10,6 +10,7 @@ wd_cc_library(
         "crypto-keys.c++",
         "diagnostics-channel.c++",
         "module.c++",
+        "process.c++",
         "timers.c++",
         "util.c++",
         "zlib-util.c++",
@@ -19,6 +20,7 @@ wd_cc_library(
         "diagnostics-channel.h",
         "module.h",
         "node.h",
+        "process.h",
         "timers.h",
         "util.h",
         "zlib-util.h",
@@ -52,6 +54,7 @@ wd_cc_library(
         "buffer-string-search.h",
         "dns.h",
         "i18n.h",
+        "node-version.h",
         "url.h",
     ],
     implementation_deps = [
@@ -411,4 +414,64 @@ wd_test(
     src = "tests/bound-als-test.wd-test",
     args = ["--experimental"],
     data = ["tests/bound-als-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-access-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-access-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-chown-chmod-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-chown-chmod-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-utimes-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-utimes-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-stat-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-stat-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-misc-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-misc-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-link-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-link-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-dir-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-dir-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-filehandle-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-filehandle-test.js"],
+)
+
+wd_test(
+    src = "tests/fs-glob-test.wd-test",
+    args = ["--experimental"],
+    data = ["tests/fs-glob-test.js"],
 )

@@ -111,6 +111,7 @@ class EsModule final: public Module {
     v8::ScriptCompiler::CachedData* data = nullptr;
     auto options = v8::ScriptCompiler::CompileOptions::kNoCompileOptions;
 
+    v8::Local<v8::Module> module;
     {
       // Check to see if we have cached compilation data for this module.
       auto lock = cachedData.lockShared();
@@ -120,31 +121,29 @@ class EsModule final: public Module {
         data = new v8::ScriptCompiler::CachedData(
             c->data, c->length, v8::ScriptCompiler::CachedData::BufferPolicy::BufferNotOwned);
       }
-    }
 
-    // Note that the Source takes ownership of the CachedData pointer that we pass in.
-    // Do not use data after this point.
-    v8::ScriptCompiler::Source source(js.strExtern(this->source), origin, data);
+      // Note that the Source takes ownership of the CachedData pointer that we pass in.
+      // Do not use data after this point.
+      v8::ScriptCompiler::Source source(js.strExtern(this->source), origin, data);
 
-    auto maybeCached = source.GetCachedData();
-    if (maybeCached != nullptr) {
-      if (!maybeCached->rejected) {
-        // We found valid cached data and need to set the option to consume it to avoid
-        // compiling again below...
-        options = v8::ScriptCompiler::CompileOptions::kConsumeCodeCache;
-      } else {
-        // In this case we'll just log a warning and continue on. This is potentially
-        // a signal that something with the compile cache is not working correctly but
-        // it is not a fatal error. If we spot this in the wild, it warrants some
-        // investigation.
-        LOG_WARNING_ONCE("NOSENTRY Cached data for ESM module was rejected");
+      auto maybeCached = source.GetCachedData();
+      if (maybeCached != nullptr) {
+        if (!maybeCached->rejected) {
+          // We found valid cached data and need to set the option to consume it to avoid
+          // compiling again below...
+          options = v8::ScriptCompiler::CompileOptions::kConsumeCodeCache;
+        } else {
+          // In this case we'll just log a warning and continue on. This is potentially
+          // a signal that something with the compile cache is not working correctly but
+          // it is not a fatal error. If we spot this in the wild, it warrants some
+          // investigation.
+          LOG_WARNING_ONCE("NOSENTRY Cached data for ESM module was rejected");
+        }
       }
-    }
 
-    v8::Local<v8::Module> module;
-
-    if (!v8::ScriptCompiler::CompileModule(js.v8Isolate, &source, options).ToLocal(&module)) {
-      return v8::MaybeLocal<v8::Module>();
+      if (!v8::ScriptCompiler::CompileModule(js.v8Isolate, &source, options).ToLocal(&module)) {
+        return v8::MaybeLocal<v8::Module>();
+      }
     }
 
     // If the options are still kNoCompileOptions, then we did not have or use cached
@@ -152,10 +151,10 @@ class EsModule final: public Module {
     // we do not generate the cache multiple times needlessly. When the lock is acquired
     // we check again to see if the cache is still empty, and skip generating if it is not.
     if (options == v8::ScriptCompiler::CompileOptions::kNoCompileOptions) {
+      auto lock = cachedData.lockExclusive();
       if (auto ptr = v8::ScriptCompiler::CreateCodeCache(module->GetUnboundModuleScript())) {
         kj::Own<v8::ScriptCompiler::CachedData> cached(
             ptr, kj::_::HeapDisposer<v8::ScriptCompiler::CachedData>::instance);
-        auto lock = cachedData.lockExclusive();
         *lock = kj::mv(cached);
       }
     }
@@ -573,9 +572,8 @@ class IsolateModuleRegistry final {
 v8::MaybeLocal<v8::Value> SyntheticModule::evaluationSteps(
     v8::Local<v8::Context> context, v8::Local<v8::Module> module) {
   try {
-    auto isolate = context->GetIsolate();
-    auto& js = Lock::from(isolate);
-    auto& registry = IsolateModuleRegistry::from(isolate);
+    auto& js = Lock::current();
+    auto& registry = IsolateModuleRegistry::from(js.v8Isolate);
 
     KJ_IF_SOME(found, registry.lookup(js, module)) {
       return found.module.evaluate(
@@ -585,7 +583,7 @@ v8::MaybeLocal<v8::Value> SyntheticModule::evaluationSteps(
     // This case really should never actually happen but we handle it anyway.
     KJ_LOG(ERROR, "Synthetic module not found in registry for evaluation");
 
-    isolate->ThrowError(js.str("Requested module does not exist"_kj));
+    js.v8Isolate->ThrowError(js.str("Requested module does not exist"_kj));
     return v8::MaybeLocal<v8::Value>();
   } catch (...) {
     kj::throwFatalException(kj::getCaughtExceptionAsKj());
@@ -595,9 +593,8 @@ v8::MaybeLocal<v8::Value> SyntheticModule::evaluationSteps(
 // Set up the special `import.meta` property for the module.
 void importMeta(
     v8::Local<v8::Context> context, v8::Local<v8::Module> module, v8::Local<v8::Object> meta) {
-  auto isolate = context->GetIsolate();
-  auto& js = Lock::from(isolate);
-  auto& registry = IsolateModuleRegistry::from(isolate);
+  auto& js = Lock::current();
+  auto& registry = IsolateModuleRegistry::from(js.v8Isolate);
   try {
     js.tryCatch([&] {
       KJ_IF_SOME(found, registry.lookup(js, module)) {
@@ -664,7 +661,7 @@ v8::MaybeLocal<v8::Promise> dynamicImport(v8::Local<v8::Context> context,
     v8::Local<v8::Value> resource_name,
     v8::Local<v8::String> specifier,
     v8::Local<v8::FixedArray> import_attributes) {
-  auto isolate = context->GetIsolate();
+  auto& js = Lock::current();
 
   // Since this method is called directly by V8, we don't want to use jsg::check
   // or the js.rejectedPromise variants since those can throw JsExceptionThrown.
@@ -678,8 +675,7 @@ v8::MaybeLocal<v8::Promise> dynamicImport(v8::Local<v8::Context> context,
     return resolver->GetPromise();
   };
 
-  auto& js = Lock::from(isolate);
-  auto& registry = IsolateModuleRegistry::from(isolate);
+  auto& registry = IsolateModuleRegistry::from(js.v8Isolate);
   try {
     return js.tryCatch([&]() -> v8::MaybeLocal<v8::Promise> {
       auto spec = js.toString(specifier);
@@ -749,9 +745,8 @@ v8::MaybeLocal<v8::Module> resolveCallback(v8::Local<v8::Context> context,
     v8::Local<v8::String> specifier,
     v8::Local<v8::FixedArray> import_attributes,
     v8::Local<v8::Module> referrer) {
-  auto isolate = context->GetIsolate();
-  auto& registry = IsolateModuleRegistry::from(isolate);
-  auto& js = Lock::from(isolate);
+  auto& js = Lock::current();
+  auto& registry = IsolateModuleRegistry::from(js.v8Isolate);
 
   return js.tryCatch([&]() -> v8::MaybeLocal<v8::Module> {
     auto spec = kj::str(specifier);
