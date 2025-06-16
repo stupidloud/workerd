@@ -18,23 +18,11 @@ deps_gen()
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-NODE_VERSION = "22.14.0"
+NODE_VERSION = "22.15.1"
 
 load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 
 bazel_skylib_workspace()
-
-load(
-    "@build_bazel_apple_support//lib:repositories.bzl",
-    "apple_support_dependencies",
-)
-
-apple_support_dependencies()
-
-# apple_support now requires bazel_features, pull in its dependencies too.
-load("@bazel_features//:deps.bzl", "bazel_features_deps")
-
-bazel_features_deps()
 
 # ========================================================================================
 # Simple dependencies
@@ -78,10 +66,6 @@ http_archive(
     url = "https://github.com/nodejs/ncrypto/archive/refs/tags/1.0.1.tar.gz",
 )
 
-load("//build/deps:dep_pyodide.bzl", "dep_pyodide")
-
-dep_pyodide()
-
 # ========================================================================================
 # tcmalloc
 http_archive(
@@ -120,17 +104,6 @@ git_repository(
 
 # ========================================================================================
 # Rust bootstrap
-#
-
-git_repository(
-    name = "zlib",
-    build_file = "//:build/BUILD.zlib",
-    # This should match the version specified in V8 DEPS, but in practice it is generally acceptable
-    # for it to be behind – zlib is very stable and its API has not changed in a long time, most
-    # changes to the Chromium fork affect ancillary tools and not the zlib library itself.
-    commit = "1e85c01b15363d11fab81c46fe2b5c2179113f70",
-    remote = "https://chromium.googlesource.com/chromium/src/third_party/zlib.git",
-)
 
 load("//:build/rust_toolchains.bzl", "rust_toolchains")
 
@@ -257,3 +230,7 @@ new_local_repository(
     build_file = "@workerd//deps/rust:BUILD.lolhtml",
     path = "empty",
 )
+
+load("//build/deps:dep_pyodide.bzl", "dep_pyodide")
+
+dep_pyodide()

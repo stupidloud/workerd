@@ -280,7 +280,7 @@ kj::Promise<void> WorkerEntrypoint::request(kj::HttpMethod method,
     };
 
     t.setEventInfo(context.getInvocationSpanContext(), timestamp,
-        tracing::FetchEventInfo(method, kj::str(url), kj::str(cfJson), kj::mv(traceHeadersArray)));
+        tracing::FetchEventInfo(method, kj::str(url), kj::mv(cfJson), kj::mv(traceHeadersArray)));
   }
 
   auto metricsForCatch = kj::addRef(incomingRequest->getMetrics());
@@ -710,6 +710,9 @@ kj::Promise<bool> WorkerEntrypoint::test() {
   incomingRequest->delivered();
 
   auto& context = incomingRequest->getContext();
+  KJ_IF_SOME(t, context.getWorkerTracer()) {
+    t.setEventInfo(context.getInvocationSpanContext(), context.now(), tracing::CustomEventInfo());
+  }
 
   context.addWaitUntil(context.run([entrypointName = entrypointName, props = kj::mv(props),
                                        &context, &metrics = incomingRequest->getMetrics()](
