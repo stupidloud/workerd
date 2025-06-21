@@ -9,7 +9,6 @@
 #include <workerd/io/worker.h>
 #include <workerd/server/alarm-scheduler.h>
 #include <workerd/server/workerd.capnp.h>
-#include <workerd/util/sqlite.h>
 
 #include <kj/async-io.h>
 #include <kj/compat/http.h>
@@ -102,6 +101,7 @@ class Server final: private kj::TaskSet::ErrorHandler {
     kj::String uniqueKey;
     bool isEvictable;
     bool enableSql;
+    kj::Maybe<config::Worker::DurableObjectNamespace::ContainerOptions::Reader> containerOptions;
   };
   struct Ephemeral {
     bool isEvictable;
@@ -153,6 +153,9 @@ class Server final: private kj::TaskSet::ErrorHandler {
 
   class Service;
   kj::Own<Service> invalidConfigServiceSingleton;
+
+  class ActorClass;
+  kj::Own<ActorClass> invalidConfigActorClassSingleton;
 
   // Information about all known actor namespaces. Maps serviceName -> className -> config.
   // This needs to be populated in advance of constructing any services, in order to be able to
@@ -229,12 +232,18 @@ class Server final: private kj::TaskSet::ErrorHandler {
   kj::Own<Service> lookupService(
       config::ServiceDesignator::Reader designator, kj::String errorContext);
 
+  // Like lookupService() but looks up an actor class (especially for use as a facet class).
+  // Returns none on a config error.
+  kj::Own<ActorClass> lookupActorClass(
+      config::ServiceDesignator::Reader designator, kj::String errorContext);
+
   kj::Promise<void> listenHttp(kj::Own<kj::ConnectionReceiver> listener,
       kj::Own<Service> service,
       kj::StringPtr physicalProtocol,
       kj::Own<HttpRewriter> rewriter);
 
   class InvalidConfigService;
+  class InvalidConfigActorClass;
   class ExternalHttpService;
   class ExternalTcpService;
   class NetworkService;
@@ -242,6 +251,14 @@ class Server final: private kj::TaskSet::ErrorHandler {
   class WorkerService;
   class WorkerEntrypointService;
   class HttpListener;
+
+  struct ErrorReporter;
+  struct ConfigErrorReporter;
+  struct WorkerDef;
+  kj::Own<WorkerService> makeWorkerImpl(kj::StringPtr name,
+      WorkerDef def,
+      capnp::List<config::Extension>::Reader extensions,
+      ErrorReporter& errorReporter);
 
   void startServices(jsg::V8System& v8System,
       config::Config::Reader config,

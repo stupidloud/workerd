@@ -88,3 +88,12 @@ build:ci-windows-debug --config=debug
 test:ci-linux --test_size_filters=
 test:ci-macOS --test_size_filters=
 test:ci-windows --test_size_filters=
+
+# Enable reporting whenever WPT tests are run
+test:ci-test --config=wpt-test
+common:wpt-test --test_env=GEN_TEST_REPORT=1
+common:wpt-test --test_env=GEN_TEST_STATS=1
+
+# Config to produce a full WPT report (also disables test caching)
+common:wpt-report --config=wpt-test
+common:wpt-report --cache_test_results=no

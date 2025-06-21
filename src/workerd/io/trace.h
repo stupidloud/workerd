@@ -571,18 +571,18 @@ struct Attribute final {
   using Value = kj::OneOf<kj::String, bool, double, int64_t>;
   using Values = kj::Array<Value>;
 
-  explicit Attribute(kj::String name, Value&& value);
-  explicit Attribute(kj::String name, Values&& values);
+  explicit Attribute(kj::ConstString name, Value&& value);
+  explicit Attribute(kj::ConstString name, Values&& values);
 
   template <AttributeValue V>
-  explicit Attribute(kj::String name, V v): Attribute(kj::mv(name), Value(kj::mv(v))) {}
+  explicit Attribute(kj::ConstString name, V v): Attribute(kj::mv(name), Value(kj::mv(v))) {}
 
   template <AttributeValue V>
-  explicit Attribute(kj::String name, kj::Array<V> vals)
+  explicit Attribute(kj::ConstString name, kj::Array<V> vals)
       : Attribute(kj::mv(name), KJ_MAP(v, vals) { return Value(kj::mv(v)); }) {}
 
   template <AttributeValue V>
-  explicit Attribute(kj::String name, std::initializer_list<V> list)
+  explicit Attribute(kj::ConstString name, std::initializer_list<V> list)
       : Attribute(kj::mv(name), kj::heapArray<V>(list)) {}
 
   Attribute(rpc::Trace::Attribute::Reader reader);
@@ -590,7 +590,7 @@ struct Attribute final {
   Attribute& operator=(Attribute&&) = default;
   KJ_DISALLOW_COPY(Attribute);
 
-  kj::String name;
+  kj::ConstString name;
   Values value;
 
   void copyTo(rpc::Trace::Attribute::Builder builder) const;
@@ -613,6 +613,18 @@ struct CompleteSpan {
   CompleteSpan(rpc::UserSpanData::Reader reader);
   void copyTo(rpc::UserSpanData::Builder builder) const;
   CompleteSpan clone() const;
+  explicit CompleteSpan(uint64_t spanId,
+      uint64_t parentSpanId,
+      kj::ConstString operationName,
+      kj::Date startTime,
+      kj::Date endTime,
+      kj::HashMap<kj::ConstString, tracing::Attribute::Value> tags)
+      : spanId(spanId),
+        parentSpanId(parentSpanId),
+        operationName(kj::mv(operationName)),
+        startTime(startTime),
+        endTime(endTime),
+        tags(kj::mv(tags)) {}
   explicit CompleteSpan(kj::ConstString operationName, kj::Date startTime)
       : operationName(kj::mv(operationName)),
         startTime(startTime),

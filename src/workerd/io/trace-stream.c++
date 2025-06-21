@@ -91,7 +91,7 @@ namespace {
   V(WALLTIME, "wallTime")                                                                          \
   V(WASCLEAN, "wasClean")
 
-#define V(N, L) constexpr kj::StringPtr N##_STR = L##_kj;
+#define V(N, L) constexpr kj::LiteralStringConst N##_STR = L##_kjc;
 STRS(V)
 #undef STRS
 
@@ -101,15 +101,24 @@ class StringCache final {
   StringCache() = default;
   KJ_DISALLOW_COPY_AND_MOVE(StringCache);
 
-  jsg::JsValue get(jsg::Lock& js, kj::StringPtr value) {
+  // Inserted string keys must live as long as the cache. For string constants (the common case),
+  // we use LiteralStringConst and avoid memory allocation. For temporary strings, we pass in a
+  // StringPtr and allocate a string. Having ConstString as the value type fits both cases.
+  jsg::JsValue get(jsg::Lock& js, kj::LiteralStringConst value) {
     return cache
         .findOrCreate(value, [&]() -> decltype(cache)::Entry {
       return {value, jsg::JsRef<jsg::JsValue>(js, js.strIntern(value))};
     }).getHandle(js);
   }
+  jsg::JsValue get(jsg::Lock& js, kj::StringPtr value) {
+    return cache
+        .findOrCreate(value, [&]() -> decltype(cache)::Entry {
+      return {kj::ConstString(kj::str(value)), jsg::JsRef<jsg::JsValue>(js, js.strIntern(value))};
+    }).getHandle(js);
+  }
 
  private:
-  kj::HashMap<kj::StringPtr, jsg::JsRef<jsg::JsValue>> cache;
+  kj::HashMap<kj::ConstString, jsg::JsRef<jsg::JsValue>> cache;
 };
 
 // Why ToJS(...) functions and not JSG_STRUCT? Good question. The various tracing:*
@@ -725,7 +734,7 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
   // shutdown.
   kj::Promise<void> handleOnset(Worker::Lock& lock,
       IoContext& ioContext,
-      kj::ArrayPtr<tracing::TailEvent> events,
+      kj::Array<tracing::TailEvent> events,
       rpc::TailStreamTarget::TailStreamResults::Builder results) {
     // There should be only a single onset event in this batch.
     KJ_ASSERT(events.size() == 1 && events[0].event.is<tracing::Onset>(),
@@ -835,7 +844,7 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
   kj::Promise<void> handleEvents(Worker::Lock& lock,
       const jsg::JsValue& handler,
       IoContext& ioContext,
-      kj::ArrayPtr<tracing::TailEvent> events,
+      kj::Array<tracing::TailEvent> events,
       rpc::TailStreamTarget::TailStreamResults::Builder results) {
     jsg::Lock& js = lock;
 
@@ -864,6 +873,8 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
       if (event.event.is<tracing::Outcome>()) {
         finishing = true;
         results.setStop(true);
+        // We set doFulfill to indicate that the outcome event has been received via RPC and no more
+        // events are expected.
         doFulfill = true;
       };
 
@@ -897,17 +908,16 @@ class TailStreamTarget final: public rpc::TailStreamTarget::Server {
         // Synthesize sub-events
         auto open = SpanOpen(span.parentSpanId, kj::str(span.operationName));
         auto close = SpanClose();
-        kj::Vector<workerd::tracing::Attribute> attr(span.tags.size());
-        for (auto& tag: span.tags) {
-          attr.add(workerd::tracing::Attribute(kj::str(tag.key), kj::mv(tag.value)));
-        }
+        kj::Array<tracing::Attribute> attr = KJ_MAP(tag, span.tags) -> tracing::Attribute {
+          return tracing::Attribute(kj::mv(tag.key), kj::mv(tag.value));
+        };
         InvocationSpanContext context(event.traceId, event.invocationId, event.spanId);
 
         // TODO(o11y): Replace this with proper instrumentation so that SpanOpen/SpanClose/
         // Attributes events are created and reported individually. Sequence is not supported here yet.
         auto openEvent = TailEvent(context, span.startTime, 0, kj::mv(open));
         auto closeEvent = TailEvent(context, span.endTime, 0, kj::mv(close));
-        auto attrEvent = TailEvent(context, span.startTime, 0, attr.releaseAsArray());
+        auto attrEvent = TailEvent(context, span.startTime, 0, kj::mv(attr));
         processEvent(openEvent);
         processEvent(attrEvent);
         processEvent(closeEvent);
@@ -988,13 +998,8 @@ kj::Promise<WorkerInterface::CustomEvent::Result> TailStreamCustomEventImpl::run
   kj::ForkedPromise<void> forked = donePromise.fork();
   ioContext.addWaitUntil(forked.addBranch().attach(ioContext.registerPendingEvent()));
 
-  KJ_DEFER({
-    // waitUntil() should allow extending execution on the server side even when the client
-    // disconnects.
-    waitUntilTasks.add(incomingRequest->drain().attach(kj::mv(incomingRequest)));
-  });
-
   co_await forked.addBranch().exclusiveJoin(ioContext.onAbort());
+  co_await incomingRequest->drain();
   co_return WorkerInterface::CustomEvent::Result{.outcome = EventOutcome::OK};
 }
 
@@ -1004,8 +1009,6 @@ kj::Promise<WorkerInterface::CustomEvent::Result> TailStreamCustomEventImpl::sen
     rpc::EventDispatcher::Client dispatcher) {
   auto revokePaf = kj::newPromiseAndFulfiller<void>();
 
-  // TODO(streaming-tail): Session is currently being reported as canceled when using
-  // TailStreamCustomEventImpl via RPC, investigate.
   KJ_DEFER({
     if (revokePaf.fulfiller->isWaiting()) {
       revokePaf.fulfiller->reject(KJ_EXCEPTION(DISCONNECTED, "Streaming tail session canceled"));
@@ -1153,7 +1156,7 @@ kj::Maybe<kj::Own<tracing::TailStreamWriter>> initializeTailStreamWriter(
 
   auto state = kj::heap<TailStreamWriterState>(kj::mv(streamingTailWorkers), waitUntilTasks);
 
-  return kj::refcounted<tracing::TailStreamWriter>(
+  return kj::heap<tracing::TailStreamWriter>(
       // This lambda is called for every streaming tail event that is reported. We use
       // the TailStreamWriterState for this stream to actually handle the event.
       // Pay attention to the ownership of state here. The lambda holds a bare
@@ -1176,9 +1179,15 @@ kj::Maybe<kj::Own<tracing::TailStreamWriter>> initializeTailStreamWriter(
         state.inner = KJ_MAP(wi, pending) {
           auto customEvent = kj::heap<tracing::TailStreamCustomEventImpl>();
           auto result = customEvent->getCap();
-          waitUntilTasks.add(
-              wi->customEvent(kj::mv(customEvent)).attach(kj::mv(wi)).ignoreResult());
-          return kj::refcounted<TailStreamWriterState::Active>(kj::mv(result));
+          auto active = kj::refcounted<TailStreamWriterState::Active>(kj::mv(result));
+
+          // Attach the workerInterface and customEvent to the waitUntil tasks so that they stay
+          // alive until tail worker operations including JS execution are complete, including
+          // returning the outcome.
+          waitUntilTasks.add(wi->customEvent(kj::mv(customEvent))
+                                 .attach(kj::mv(wi), kj::addRef(*active))
+                                 .ignoreResult());
+          return active;
         };
 
         // At this point our writer state is "active", which means the state
