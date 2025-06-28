@@ -229,8 +229,8 @@ void IsolateBase::deferDestruction(Item item) {
   queue.lockExclusive()->push(kj::mv(item));
 }
 
-kj::Own<const ExternalMemoryTarget> IsolateBase::getExternalMemoryTarget() {
-  return kj::atomicAddRef(*externalMemoryTarget);
+kj::Arc<const ExternalMemoryTarget> IsolateBase::getExternalMemoryTarget() {
+  return externalMemoryTarget.addRef();
 }
 
 void IsolateBase::terminateExecution() const {
@@ -297,8 +297,9 @@ HeapTracer& HeapTracer::getTracer(v8::Isolate* isolate) {
 void HeapTracer::ResetRoot(const v8::TracedReference<v8::Value>& handle) {
   // V8 calls this to tell us when our wrapper can be dropped. See comment about droppable
   // references in Wrappable::attachWrapper() for details.
-  auto& wrappable =
-      *static_cast<Wrappable*>(handle.As<v8::Object>()->GetAlignedPointerFromInternalField(
+  v8::HandleScope scope(isolate);
+  auto& wrappable = *static_cast<Wrappable*>(
+      handle.As<v8::Object>().Get(isolate)->GetAlignedPointerFromInternalField(
           Wrappable::WRAPPED_OBJECT_FIELD_INDEX));
 
   // V8 gets angry if we do not EXPLICITLY call `Reset()` on the wrapper. If we merely destroy it
@@ -368,7 +369,7 @@ IsolateBase::IsolateBase(V8System& system,
     : v8System(system),
       cppHeap(newCppHeap(const_cast<V8PlatformWrapper*>(system.platformWrapper.get()))),
       ptr(newIsolate(kj::mv(createParams), cppHeap.release(), group)),
-      externalMemoryTarget(kj::atomicRefcounted<ExternalMemoryTarget>(ptr)),
+      externalMemoryTarget(kj::arc<ExternalMemoryTarget>(ptr)),
       envAsyncContextKey(kj::refcounted<AsyncContextFrame::StorageKey>()),
       heapTracer(ptr),
       observer(kj::mv(observer)) {
@@ -489,7 +490,7 @@ void IsolateBase::oomError(const char* location, const v8::OOMDetails& oom) {
 
 v8::ModifyCodeGenerationFromStringsResult IsolateBase::modifyCodeGenCallback(
     v8::Local<v8::Context> context, v8::Local<v8::Value> source, bool isCodeLike) {
-  v8::Isolate* isolate = context->GetIsolate();
+  v8::Isolate* isolate = v8::Isolate::GetCurrent();
   IsolateBase* self = static_cast<IsolateBase*>(isolate->GetData(SET_DATA_ISOLATE_BASE));
   return {.codegen_allowed = self->evalAllowed, .modified_source = {}};
 }
@@ -497,13 +498,13 @@ v8::ModifyCodeGenerationFromStringsResult IsolateBase::modifyCodeGenCallback(
 bool IsolateBase::allowWasmCallback(v8::Local<v8::Context> context, v8::Local<v8::String> source) {
   // Don't allow WASM unless arbitrary eval() is allowed.
   IsolateBase* self =
-      static_cast<IsolateBase*>(context->GetIsolate()->GetData(SET_DATA_ISOLATE_BASE));
+      static_cast<IsolateBase*>(v8::Isolate::GetCurrent()->GetData(SET_DATA_ISOLATE_BASE));
   return self->evalAllowed;
 }
 
 bool IsolateBase::jspiEnabledCallback(v8::Local<v8::Context> context) {
   IsolateBase* self =
-      static_cast<IsolateBase*>(context->GetIsolate()->GetData(SET_DATA_ISOLATE_BASE));
+      static_cast<IsolateBase*>(v8::Isolate::GetCurrent()->GetData(SET_DATA_ISOLATE_BASE));
   return self->jspiEnabled;
 }
 

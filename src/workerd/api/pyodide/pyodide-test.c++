@@ -43,14 +43,14 @@ KJ_TEST("getPythonSnapshotRelease") {
   featureFlags.setPythonWorkers20250116(true);
   {
     auto res = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
-    KJ_ASSERT(res.getPyodide() == "0.27.5");
+    KJ_ASSERT(res.getPyodide() == "0.27.7");
     KJ_ASSERT(res.getFlagName() == "pythonWorkers20250116");
   }
 
   featureFlags.setPythonWorkersDevPyodide(false);
   {
     auto res = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
-    KJ_ASSERT(res.getPyodide() == "0.27.5");
+    KJ_ASSERT(res.getPyodide() == "0.27.7");
     KJ_ASSERT(res.getFlagName() == "pythonWorkers20250116");
   }
 }
@@ -242,7 +242,6 @@ w["h
   KJ_REQUIRE(result.size() == 0);
 }
 
-using pyodide::ArtifactBundler;
 using pyodide::PythonModuleInfo;
 
 template <typename... Params>

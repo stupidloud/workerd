@@ -2,13 +2,12 @@
 
 #include <workerd/io/compatibility-date.capnp.h>
 #include <workerd/jsg/jsg.h>
-#include <workerd/util/uuid.h>
 
 #include <kj/hash.h>
 #include <kj/map.h>
 #include <kj/mutex.h>
 #include <kj/table.h>
-#include <kj/timer.h>
+#include <kj/time.h>
 
 #include <list>
 #include <set>
@@ -171,7 +170,6 @@ class SharedMemoryCache: public kj::AtomicRefcounted {
       kj::Maybe<AdditionalResizeMemoryLimitHandler&> additionalResizeMemoryLimitHandler,
       const kj::MonotonicClock& timer);
 
- public:
   // RAII class that attaches itself to a cache, suggests cache limits to the
   // cache it is attached to, and allows interacting with the cache.
   class Use {
@@ -343,7 +341,7 @@ class SharedMemoryCache: public kj::AtomicRefcounted {
   // when a new version of a worker is deployed.
   class ValueSizeCallbacks {
    public:
-    inline const MemoryCacheEntry& keyForRow(const MemoryCacheEntry& entry) const {
+    inline const MemoryCacheEntry& keyForRow(const MemoryCacheEntry& entry KJ_LIFETIMEBOUND) const {
       return entry;
     }
 
@@ -366,7 +364,7 @@ class SharedMemoryCache: public kj::AtomicRefcounted {
   // at the very end, ordered by their cache keys.
   class ExpirationCallbacks {
    public:
-    inline const MemoryCacheEntry& keyForRow(const MemoryCacheEntry& entry) const {
+    inline const MemoryCacheEntry& keyForRow(const MemoryCacheEntry& entry KJ_LIFETIMEBOUND) const {
       return entry;
     }
 

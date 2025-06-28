@@ -1,5 +1,7 @@
 #include "dh.h"
 
+#include "impl.h"
+
 #include <workerd/io/io-context.h>
 
 #include <ncrypto.h>
@@ -13,8 +15,10 @@ namespace workerd::api {
 
 namespace {
 
-// Maximum DH prime size, adapted from BoringSSL.
-constexpr int OPENSSL_DH_MAX_MODULUS_BITS = 10000;
+// Maximum DH prime size, adapted from BoringSSL. This is already defined in more recent versions.
+#ifndef OPENSSL_DH_MAX_MODULUS_BITS
+#define OPENSSL_DH_MAX_MODULUS_BITS 10000
+#endif
 
 // Returns a function that can be used to create an instance of a standardized
 // Diffie-Hellman group.

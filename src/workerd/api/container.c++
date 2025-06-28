@@ -56,13 +56,20 @@ jsg::Promise<void> Container::monitor(jsg::Lock& js) {
   JSG_REQUIRE(running, Error, "monitor() cannot be called on a container that is not running.");
 
   return IoContext::current()
-      .awaitIo(js, rpcClient->monitorRequest(capnp::MessageSize{4, 0}).sendIgnoringResult())
-      .then(js, [this](jsg::Lock& js) {
+      .awaitIo(js, rpcClient->monitorRequest(capnp::MessageSize{4, 0}).send())
+      .then(js, [this](jsg::Lock& js, capnp::Response<rpc::Container::MonitorResults> results) {
     running = false;
+    auto exitCode = results.getExitCode();
     KJ_IF_SOME(d, destroyReason) {
       jsg::Value error = kj::mv(d);
       destroyReason = kj::none;
       js.throwException(kj::mv(error));
+    }
+
+    if (exitCode != 0) {
+      auto err = js.error(kj::str("Container exited with unexpected exit code: ", exitCode));
+      KJ_ASSERT_NONNULL(err.tryCast<jsg::JsObject>()).set(js, "exitCode", js.num(exitCode));
+      js.throwException(err);
     }
   }, [this](jsg::Lock& js, jsg::Value&& error) {
     running = false;
@@ -121,7 +128,7 @@ class Container::TcpPortWorkerInterface final: public WorkerInterface {
 
     // We don't support TLS.
     JSG_REQUIRE(parsedUrl.scheme != "https", Error,
-        "Connencting to a container using HTTPS is not currently supported; use HTTP instead. "
+        "Connecting to a container using HTTPS is not currently supported; use HTTP instead. "
         "TLS is unnecessary anyway, as the connection is already secure by default.");
 
     // Schemes other than http: and https: should have been rejected earlier, but let's verify.

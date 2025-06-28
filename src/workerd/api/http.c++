@@ -190,7 +190,7 @@ bool Headers::hasLowerCase(kj::StringPtr name) {
     KJ_DREQUIRE(!('A' <= c && c <= 'Z'));
   }
 #endif
-  return headers.find(name) != headers.end();
+  return headers.contains(name);
 }
 
 kj::Array<Headers::DisplayedHeader> Headers::getDisplayedHeaders(jsg::Lock& js) {
@@ -306,7 +306,7 @@ kj::ArrayPtr<jsg::ByteString> Headers::getAll(jsg::ByteString name) {
 
 bool Headers::has(jsg::ByteString name) {
   requireValidHeaderName(name);
-  return headers.find(toLower(kj::mv(name))) != headers.end();
+  return headers.contains(toLower(kj::mv(name)));
 }
 
 void Headers::set(jsg::Lock& js, jsg::ByteString name, jsg::ByteString value) {
@@ -2511,7 +2511,6 @@ jsg::Promise<void> Fetcher::delete_(jsg::Lock& js, kj::String url) {
 jsg::Promise<Fetcher::QueueResult> Fetcher::queue(
     jsg::Lock& js, kj::String queueName, kj::Array<ServiceBindingQueueMessage> messages) {
   auto& ioContext = IoContext::current();
-  auto worker = getClient(ioContext, kj::none, "queue"_kjc);
 
   auto encodedMessages = kj::heapArrayBuilder<IncomingQueueMessage>(messages.size());
   for (auto& msg: messages) {
@@ -2538,6 +2537,8 @@ jsg::Promise<Fetcher::QueueResult> Fetcher::queue(
     }
   }
 
+  // Only create worker interface after the error checks above to reduce overhead in case of errors.
+  auto worker = getClient(ioContext, kj::none, "queue"_kjc);
   auto event = kj::refcounted<api::QueueCustomEventImpl>(QueueEvent::Params{
     .queueName = kj::mv(queueName),
     .messages = encodedMessages.finish(),
