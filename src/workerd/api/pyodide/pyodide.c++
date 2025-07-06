@@ -12,8 +12,13 @@
 
 #include <kj/array.h>
 #include <kj/common.h>
+#include <kj/compat/gzip.h>
+#include <kj/compat/tls.h>
 #include <kj/debug.h>
 #include <kj/string.h>
+
+// for std::sort
+#include <algorithm>
 
 namespace workerd::api::pyodide {
 
@@ -406,14 +411,35 @@ PyodideMetadataReader::State::State(const State& other)
       snapshotToDisk(other.snapshotToDisk),
       createBaselineSnapshot(other.createBaselineSnapshot),
       memorySnapshot(other.memorySnapshot.map(
-          [](auto& snapshot) { return kj::heapArray<kj::byte>(snapshot); })),
-      durableObjectClasses(other.durableObjectClasses.map(
-          [](auto& classes) { return KJ_MAP(c, classes) { return kj::str(c); }; })),
-      entrypointClasses(other.entrypointClasses.map(
-          [](auto& classes) { return KJ_MAP(c, classes) { return kj::str(c); }; })) {}
+          [](auto& snapshot) { return kj::heapArray<kj::byte>(snapshot); })) {}
 
 kj::Own<PyodideMetadataReader::State> PyodideMetadataReader::State::clone() {
   return kj::heap<PyodideMetadataReader::State>(*this);
+}
+
+void PyodideMetadataReader::State::verifyNoMainModuleInVendor() {
+  // Verify that we don't have module named after the main module in the `vendor` subdir.
+  // mainModule includes the .py extension, so we need to extract the base name
+  kj::ArrayPtr<const char> mainModuleBase = mainModule;
+  if (mainModule.endsWith(".py")) {
+    mainModuleBase = mainModuleBase.slice(0, mainModuleBase.size() - 3);
+  }
+
+  for (auto& name: moduleInfo.names) {
+    if (name.startsWith(kj::str("vendor/", mainModule))) {
+      JSG_FAIL_REQUIRE(
+          Error, kj::str("Python module vendor/", mainModule, " clashes with main module"));
+    }
+    if (name == kj::str("vendor/", mainModuleBase, "/__init__.py")) {
+      JSG_FAIL_REQUIRE(Error,
+          kj::str(
+              "Python module vendor/", mainModuleBase, "/__init__.py clashes with main module"));
+    }
+    if (name == kj::str("vendor/", mainModuleBase, ".so")) {
+      JSG_FAIL_REQUIRE(
+          Error, kj::str("Python module vendor/", mainModuleBase, ".so clashes with main module"));
+    }
+  }
 }
 
 kj::Array<kj::String> PythonModuleInfo::filterPythonScriptImports(
@@ -495,6 +521,8 @@ jsg::Optional<kj::Array<kj::byte>> DiskCache::get(jsg::Lock& js, kj::String key)
   }
 }
 
+// TODO: DiskCache is currently only used for --python-save-snapshot. Can we use ArtifactBundler for
+// this instead and remove DiskCache completely?
 void DiskCache::put(jsg::Lock& js, kj::String key, kj::Array<kj::byte> data) {
   KJ_IF_SOME(root, cacheRoot) {
     kj::Path path(key);
@@ -512,12 +540,11 @@ void DiskCache::put(jsg::Lock& js, kj::String key, kj::Array<kj::byte> data) {
 
 jsg::JsValue SetupEmscripten::getModule(jsg::Lock& js) {
   js.installJspi();
-  js.v8Context()->SetSecurityToken(emscriptenRuntime.contextToken.getHandle(js));
   return emscriptenRuntime.emscriptenRuntime.getHandle(js);
 }
 
 void SetupEmscripten::visitForGc(jsg::GcVisitor& visitor) {
-  visitor.visit(const_cast<EmscriptenRuntime&>(emscriptenRuntime).emscriptenRuntime);
+  visitor.visit(emscriptenRuntime.emscriptenRuntime);
 }
 
 }  // namespace workerd::api::pyodide
@@ -603,4 +630,214 @@ kj::String getPythonBundleName(PythonSnapshotRelease::Reader pyodideRelease) {
   return kj::str(pyodideRelease.getPyodide(), "_", pyodideRelease.getPyodideRevision(), "_",
       pyodideRelease.getBackport());
 }
+
+namespace api::pyodide {
+
+// Returns a string containing the contents of the hashset, delimited by ", "
+kj::String hashsetToString(const kj::HashSet<kj::String>& set) {
+  if (set.size() == 0) {
+    return kj::String();
+  }
+
+  kj::Vector<kj::StringPtr> elems;
+  for (const auto& e: set) {
+    elems.add(e);
+  }
+
+  // Sort the elements for consistent output
+  auto array = elems.releaseAsArray();
+  std::sort(array.begin(), array.end());
+
+  return kj::str(kj::delimited(array, ", "_kjc));
+}
+
+kj::Array<kj::String> getPythonPackageFiles(kj::StringPtr lockFileContents,
+    kj::ArrayPtr<kj::String> requirements,
+    kj::StringPtr packagesVersion) {
+  auto packages = parseLockFile(lockFileContents);
+  auto depMap = getDepMapFromPackagesLock(*packages);
+
+  auto allRequirements = getPythonPackageNames(*packages, depMap, requirements, packagesVersion);
+
+  // Add the file names of all the requirements to our result array.
+  kj::Vector<kj::String> res;
+  for (const auto& ent: *packages) {
+    auto name = ent.getName();
+    auto obj = ent.getValue().getObject();
+    auto fileName = kj::str(getField(obj, "file_name").getString());
+
+    auto maybeRow = allRequirements.find(name);
+    KJ_IF_SOME(row, maybeRow) {
+      allRequirements.erase(row);
+      res.add(kj::mv(fileName));
+    } else if (packagesVersion == "20240829.4") {
+      auto packageType = getField(obj, "package_type").getString();
+      if (packageType == "cpython_module") {
+        res.add(kj::mv(fileName));
+      }
+    }
+  }
+
+  if (allRequirements.size() != 0) {
+    JSG_FAIL_REQUIRE(Error,
+        "Requested Python package(s) that are not supported: ", hashsetToString(allRequirements));
+  }
+
+  return res.releaseAsArray();
+}
+
+// Downloads a package with retry logic (up to 3 attempts with 5-second delays)
+kj::Promise<kj::Maybe<kj::Array<byte>>> downloadPackageWithRetry(kj::HttpClient& client,
+    kj::Timer& timer,
+    kj::HttpHeaderTable& headerTable,
+    kj::StringPtr url,
+    kj::StringPtr path) {
+  constexpr uint retryLimit = 3;
+  kj::HttpHeaders headers(headerTable);
+
+  for (uint retryCount = 0; retryCount < retryLimit; ++retryCount) {
+    if (retryCount > 0) {
+      // Sleep for 5 seconds before retrying
+      co_await timer.afterDelay(5 * kj::SECONDS);
+      KJ_LOG(INFO, "Retrying package download", path, "attempt", retryCount + 1, "of", retryLimit);
+    }
+
+    try {
+      auto req = client.request(kj::HttpMethod::GET, url, headers);
+      auto res = co_await req.response;
+
+      if (res.statusCode != 200) {
+        KJ_LOG(WARNING, "Failed to download package", path, res.statusCode, "attempt",
+            retryCount + 1, "of", retryLimit);
+        continue;  // Try again in the next iteration
+      }
+
+      // Request succeeded, read the body
+      co_return co_await res.body->readAllBytes();
+    } catch (kj::Exception& e) {
+      if (retryCount + 1 >= retryLimit) {
+        // This was our last attempt
+        KJ_LOG(WARNING, "Failed to download package after all retry attempts", path, e, "attempts",
+            retryLimit);
+      } else {
+        KJ_LOG(WARNING, "Failed to download package", path, e, "attempt", retryCount + 1, "of",
+            retryLimit, "will retry");
+      }
+    }
+  }
+
+  co_return kj::none;  // All retry attempts failed
+}
+
+// Loads a single Python package, either from disk cache or by downloading it
+kj::Promise<void> loadPyodidePackage(const PythonConfig& pyConfig,
+    const PyodidePackageManager& pyodidePackageManager,
+    kj::StringPtr packagesVersion,
+    kj::StringPtr filename,
+    kj::HttpClient& client,
+    kj::Timer& timer,
+    kj::HttpHeaderTable& table) {
+
+  auto path = kj::str("python-package-bucket/", packagesVersion, "/", filename);
+
+  // First check if we already have this package in memory
+  if (pyodidePackageManager.getPyodidePackage(path) != kj::none) {
+    co_return;
+  }
+
+  // Then check disk cache
+  KJ_IF_SOME(diskCachePath, pyConfig.packageDiskCacheRoot) {
+    auto parsedPath = kj::Path::parse(path);
+
+    if (diskCachePath->exists(parsedPath)) {
+      try {
+        auto file = diskCachePath->openFile(parsedPath);
+        auto blob = file->readAllBytes();
+
+        // Decompress the package
+        kj::ArrayInputStream ais(blob);
+        kj::GzipInputStream gzip(ais);
+        auto decompressed = gzip.readAllBytes();
+
+        // Store in memory
+        pyodidePackageManager.setPyodidePackageData(kj::str(path), kj::mv(decompressed));
+        co_return;
+      } catch (kj::Exception& e) {
+        // Something went wrong while reading or processing the file
+        KJ_LOG(WARNING, "Failed to read or process package from disk cache", path, e);
+      }
+    }
+  }
+
+  // Need to fetch from network
+  kj::String url =
+      kj::str("https://storage.googleapis.com/cloudflare-edgeworker-python-packages/", path);
+
+  auto maybeBody = co_await downloadPackageWithRetry(client, timer, table, url, path);
+  KJ_IF_SOME(body, maybeBody) {
+    // Successfully downloaded the package
+    // Save the compressed data to disk cache (if enabled)
+    KJ_IF_SOME(diskCachePath, pyConfig.packageDiskCacheRoot) {
+      try {
+        auto parsedPath = kj::Path::parse(path);
+        auto file = diskCachePath->openFile(parsedPath,
+            kj::WriteMode::CREATE | kj::WriteMode::MODIFY | kj::WriteMode::CREATE_PARENT);
+        file->writeAll(body);
+      } catch (kj::Exception& e) {
+        KJ_LOG(WARNING, "Failed to write package to disk cache", e);
+      }
+    }
+
+    // Now decompress and store in memory
+    kj::ArrayInputStream ais(body);
+    kj::GzipInputStream gzip(ais);
+    auto decompressed = gzip.readAllBytes();
+
+    pyodidePackageManager.setPyodidePackageData(kj::str(path), kj::mv(decompressed));
+  } else {
+    KJ_FAIL_ASSERT("Failed to download package after all retry attempts", path);
+  }
+
+  co_return;
+}
+
+void fetchPyodidePackages(const PythonConfig& pyConfig,
+    const PyodidePackageManager& pyodidePackageManager,
+    kj::ArrayPtr<kj::String> pythonRequirements,
+    workerd::PythonSnapshotRelease::Reader pythonSnapshotRelease) {
+  auto packagesVersion = pythonSnapshotRelease.getPackages();
+
+  auto pyodideLock = getPyodideLock(pythonSnapshotRelease);
+  if (pyodideLock == kj::none) {
+    KJ_LOG(WARNING, "No lock file found for Python packages version", packagesVersion);
+    return;
+  }
+
+  auto filenames =
+      getPythonPackageFiles(KJ_ASSERT_NONNULL(pyodideLock), pythonRequirements, packagesVersion);
+
+  kj::Thread([&]() {
+    kj::AsyncIoContext ioContext = kj::setupAsyncIo();
+    kj::HttpHeaderTable table;
+    kj::TlsContext::Options tlsOptions;
+    tlsOptions.useSystemTrustStore = true;
+    kj::Own<kj::TlsContext> tlsContext = kj::heap<kj::TlsContext>(kj::mv(tlsOptions));
+
+    auto& network = ioContext.provider->getNetwork();
+    auto tlsNetwork = tlsContext->wrapNetwork(network);
+    auto& timer = ioContext.provider->getTimer();
+
+    auto client = kj::newHttpClient(timer, table, network, *tlsNetwork);
+    kj::Vector<kj::Promise<void>> promises;
+    for (const auto& filename: filenames) {
+      promises.add(loadPyodidePackage(
+          pyConfig, pyodidePackageManager, packagesVersion, filename, *client, timer, table));
+    }
+
+    kj::joinPromises(promises.releaseAsArray()).wait(ioContext.waitScope);
+  });
+}
+
+}  // namespace api::pyodide
+
 }  // namespace workerd

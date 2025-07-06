@@ -89,11 +89,11 @@ class IsolateBase {
 
   // Unwraps a JavaScript exception as a kj::Exception.
   virtual kj::Exception unwrapException(
-      v8::Local<v8::Context> context, v8::Local<v8::Value> exception) = 0;
+      Lock& js, v8::Local<v8::Context> context, v8::Local<v8::Value> exception) = 0;
 
   // Wraps a kj::Exception as a JavaScript Exception.
   virtual v8::Local<v8::Value> wrapException(
-      v8::Local<v8::Context> context, kj::Exception&& exception) = 0;
+      Lock& js, v8::Local<v8::Context> context, kj::Exception&& exception) = 0;
 
   // Used by Serializer/Deserializer implementations, calls into DynamicResourceTypeMap
   // serializerMap and deserializerMap.
@@ -147,6 +147,10 @@ class IsolateBase {
     nodeJsCompatEnabled = enabled;
   }
 
+  inline void setNodeJsProcessV2Enabled(kj::Badge<Lock>, bool enabled) {
+    nodeJsProcessV2Enabled = enabled;
+  }
+
   inline bool areWarningsLogged() const {
     return maybeLogger != kj::none;
   }
@@ -156,6 +160,10 @@ class IsolateBase {
 
   inline bool isNodeJsCompatEnabled() const {
     return nodeJsCompatEnabled;
+  }
+
+  inline bool isNodeJsProcessV2Enabled() const {
+    return nodeJsProcessV2Enabled;
   }
 
   inline bool shouldSetToStringTag() const {
@@ -207,7 +215,7 @@ class IsolateBase {
   }
 
   // Get an object referencing this isolate that can be used to adjust external memory usage later
-  kj::Own<const ExternalMemoryTarget> getExternalMemoryTarget();
+  kj::Arc<const ExternalMemoryTarget> getExternalMemoryTarget();
 
   // Equivalent to getExternalMemoryTarget()->getAdjustment(amount), but saves an atomic refcount
   // increment and decrement.
@@ -287,6 +295,7 @@ class IsolateBase {
   bool captureThrowsAsRejections = false;
   bool asyncContextTrackingEnabled = false;
   bool nodeJsCompatEnabled = false;
+  bool nodeJsProcessV2Enabled = false;
   bool setToStringTag = false;
   bool allowTopLevelAwait = true;
   bool usingNewModuleRegistry = false;
@@ -309,7 +318,7 @@ class IsolateBase {
   // ExternalMemoryTarget holds a weak reference back to the isolate. ExternalMemoryAjustments
   // hold references to the ExternalMemoryTarget. This allows the ExternalMemoryAjustments to
   // outlive the isolate.
-  kj::Own<const ExternalMemoryTarget> externalMemoryTarget;
+  kj::Arc<const ExternalMemoryTarget> externalMemoryTarget;
 
   // A shared async context key for accessing env
   kj::Own<AsyncContextFrame::StorageKey> envAsyncContextKey;
@@ -443,7 +452,7 @@ void* getJsCageBase();
 //       v8::Local<v8::Context> context = lock.newContext(lock.isolate, MyContextType());
 //
 //       // Create an instance of MyType.
-//       v8::Local<v8::Object> obj = lock.getTypeHandler<MyType>().wrap(context, MyType());
+//       v8::Local<v8::Object> obj = lock.getTypeHandler<MyType>().wrap(lock, context, MyType());
 //     });
 //
 template <typename TypeWrapper>
@@ -518,16 +527,16 @@ class Isolate: public IsolateBase {
     dropWrappers([this]() { wrappers.clear(); });
   }
 
- public:
   kj::Exception unwrapException(
-      v8::Local<v8::Context> context, v8::Local<v8::Value> exception) override {
+      Lock& js, v8::Local<v8::Context> context, v8::Local<v8::Value> exception) override {
     return getWrapperByContext(context)->template unwrap<kj::Exception>(
-        context, exception, jsg::TypeErrorContext::other());
+        js, context, exception, jsg::TypeErrorContext::other());
   }
 
   v8::Local<v8::Value> wrapException(
-      v8::Local<v8::Context> context, kj::Exception&& exception) override {
-    return getWrapperByContext(context)->wrap(context, kj::none, kj::fwd<kj::Exception>(exception));
+      Lock& js, v8::Local<v8::Context> context, kj::Exception&& exception) override {
+    return getWrapperByContext(context)->wrap(
+        js, context, kj::none, kj::fwd<kj::Exception>(exception));
   }
 
   bool serialize(
@@ -577,7 +586,8 @@ class Isolate: public IsolateBase {
     // Wrap a C++ value, returning a v8::Local (possibly of a specific type).
     template <typename T>
     auto wrap(v8::Local<v8::Context> context, T&& value) {
-      return jsgIsolate.getWrapperByContext(context)->wrap(context, kj::none, kj::fwd<T>(value));
+      return jsgIsolate.getWrapperByContext(context)->wrap(
+          *this, context, kj::none, kj::fwd<T>(value));
     }
 
     // Wrap a context-independent value. Only a few built-in types, like numbers and strings,
@@ -592,7 +602,7 @@ class Isolate: public IsolateBase {
     template <typename T>
     auto unwrap(v8::Local<v8::Context> context, v8::Local<v8::Value> handle) {
       return jsgIsolate.getWrapperByContext(context)->template unwrap<T>(
-          context, handle, jsg::TypeErrorContext::other());
+          *this, context, handle, jsg::TypeErrorContext::other());
     }
 
     Ref<DOMException> domException(
@@ -648,39 +658,40 @@ class Isolate: public IsolateBase {
         jsg::Function<void(const v8::FunctionCallbackInfo<v8::Value>& info)> simpleFunction)
         override {
       return jsgIsolate.getWrapperByContext(context)->wrap(
-          context, kj::none, kj::mv(simpleFunction));
+          *this, context, kj::none, kj::mv(simpleFunction));
     }
     v8::Local<v8::Function> wrapReturningFunction(v8::Local<v8::Context> context,
         jsg::Function<v8::Local<v8::Value>(const v8::FunctionCallbackInfo<v8::Value>& info)>
             returningFunction) override {
       return jsgIsolate.getWrapperByContext(context)->wrap(
-          context, kj::none, kj::mv(returningFunction));
+          *this, context, kj::none, kj::mv(returningFunction));
     }
     v8::Local<v8::Function> wrapPromiseReturningFunction(v8::Local<v8::Context> context,
         jsg::Function<jsg::Promise<jsg::Value>(const v8::FunctionCallbackInfo<v8::Value>& info)>
             returningFunction) override {
       return jsgIsolate.getWrapperByContext(context)->wrap(
-          context, kj::none, kj::mv(returningFunction));
+          *this, context, kj::none, kj::mv(returningFunction));
     }
     kj::String toString(v8::Local<v8::Value> value) override {
       return jsgIsolate.getWrapperByContext(*this)->template unwrap<kj::String>(
-          v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
+          *this, v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
     }
     jsg::Dict<v8::Local<v8::Value>> toDict(v8::Local<v8::Value> value) override {
       return jsgIsolate.getWrapperByContext(*this)
           ->template unwrap<jsg::Dict<v8::Local<v8::Value>>>(
-              v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
+              *this, v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
     }
     jsg::Dict<jsg::JsValue> toDict(const jsg::JsValue& value) override {
       return jsgIsolate.getWrapperByContext(*this)->template unwrap<jsg::Dict<jsg::JsValue>>(
-          v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
+          *this, v8Isolate->GetCurrentContext(), value, jsg::TypeErrorContext::other());
     }
     v8::Local<v8::Promise> wrapSimplePromise(jsg::Promise<jsg::Value> promise) override {
-      return jsgIsolate.getWrapperByContext(*this)->wrap(v8Context(), kj::none, kj::mv(promise));
+      return jsgIsolate.getWrapperByContext(*this)->wrap(
+          *this, v8Context(), kj::none, kj::mv(promise));
     }
     jsg::Promise<jsg::Value> toPromise(v8::Local<v8::Value> promise) override {
       return jsgIsolate.getWrapperByContext(*this)->template unwrap<jsg::Promise<jsg::Value>>(
-          v8Isolate->GetCurrentContext(), promise, jsg::TypeErrorContext::other());
+          *this, v8Isolate->GetCurrentContext(), promise, jsg::TypeErrorContext::other());
     }
 
     template <typename T, typename... Args>
@@ -724,9 +735,10 @@ class Isolate: public IsolateBase {
     }
 
     void reportError(const JsValue& value) override {
+      auto& js = Lock::from(v8Isolate);
       KJ_IF_SOME(domException,
           jsgIsolate.getWrapperByContext(*this)->tryUnwrap(
-              v8Context(), value, static_cast<DOMException*>(nullptr), kj::none)) {
+              js, v8Context(), value, static_cast<DOMException*>(nullptr), kj::none)) {
         auto desc =
             kj::str("DOMException(", domException.getName(), "): ", domException.getMessage());
         jsgIsolate.reportError(*this, kj::mv(desc), value, JsMessage::create(*this, value));

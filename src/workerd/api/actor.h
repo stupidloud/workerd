@@ -10,12 +10,8 @@
 // abstractly related.
 
 #include <workerd/api/http.h>
-#include <workerd/api/worker-rpc.h>
 #include <workerd/io/actor-id.h>
 #include <workerd/jsg/jsg.h>
-
-#include <capnp/compat/byte-stream.h>
-#include <capnp/compat/http-over-capnp.h>
 
 namespace workerd {
 template <typename T>
@@ -155,10 +151,25 @@ class ReplicaActorOutgoingFactory final: public Fetcher::OutgoingFactory {
 
 // Global durable object class binding type.
 class DurableObjectNamespace: public jsg::Object {
-
  public:
+  // Instead of providing a channel ID, the caller can pass a factory object. This is used in cases
+  // where a DurableObjectNamespace is constructed dynamically within an execution context, rather
+  // than being a long-lived binding.
+  class ActorChannelFactory: public kj::Refcounted {
+   public:
+    virtual kj::Own<IoChannelFactory::ActorChannel> getGlobalActor(
+        const ActorIdFactory::ActorId& id,
+        kj::Maybe<kj::String> locationHint,
+        ActorGetMode mode,
+        bool enableReplicaRouting,
+        SpanParent parentSpan) = 0;
+  };
+
   DurableObjectNamespace(uint channel, kj::Own<ActorIdFactory> idFactory)
       : channel(channel),
+        idFactory(kj::mv(idFactory)) {}
+  DurableObjectNamespace(IoOwn<ActorChannelFactory> factory, kj::Own<ActorIdFactory> idFactory)
+      : channel(kj::mv(factory)),
         idFactory(kj::mv(idFactory)) {}
 
   struct NewUniqueIdOptions {
@@ -167,7 +178,7 @@ class DurableObjectNamespace: public jsg::Object {
 
     JSG_STRUCT(jurisdiction);
 
-    JSG_STRUCT_TS_DEFINE(type DurableObjectJurisdiction = "eu" | "fedramp");
+    JSG_STRUCT_TS_DEFINE(type DurableObjectJurisdiction = "eu" | "fedramp" | "fedramp-high");
     // Possible values from https://developers.cloudflare.com/workers/runtime-apis/durable-objects/#restricting-objects-to-a-jurisdiction
     JSG_STRUCT_TS_OVERRIDE({
       jurisdiction?: DurableObjectJurisdiction;
@@ -238,7 +249,7 @@ class DurableObjectNamespace: public jsg::Object {
   }
 
  private:
-  uint channel;
+  kj::OneOf<uint, IoOwn<ActorChannelFactory>> channel;
   kj::Own<ActorIdFactory> idFactory;
 
   jsg::Ref<DurableObject> getImpl(jsg::Lock& js,
@@ -247,9 +258,27 @@ class DurableObjectNamespace: public jsg::Object {
       jsg::Optional<GetDurableObjectOptions> options);
 };
 
+// DurableObjectClass represents a binding to a Durable Object class that can be used
+// as a facet. The only use of this type is to pass to `ctx.facets.get()`.
+class DurableObjectClass: public jsg::Object {
+ public:
+  DurableObjectClass(uint channel): channel(channel) {}
+  DurableObjectClass(IoOwn<IoChannelFactory::ActorClassChannel> channel)
+      : channel(kj::mv(channel)) {}
+
+  kj::Own<IoChannelFactory::ActorClassChannel> getChannel(IoContext& ioctx);
+
+  JSG_RESOURCE_TYPE(DurableObjectClass) {
+    // No methods - this is just a handle that gets passed to ctx.facets.get()
+  }
+
+ private:
+  kj::OneOf<uint, IoOwn<IoChannelFactory::ActorClassChannel>> channel;
+};
+
 #define EW_ACTOR_ISOLATE_TYPES                                                                     \
   api::ColoLocalActorNamespace, api::DurableObject, api::DurableObjectId,                          \
       api::DurableObjectNamespace, api::DurableObjectNamespace::NewUniqueIdOptions,                \
-      api::DurableObjectNamespace::GetDurableObjectOptions
+      api::DurableObjectNamespace::GetDurableObjectOptions, api::DurableObjectClass
 
 }  // namespace workerd::api

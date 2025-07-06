@@ -252,11 +252,10 @@ class Module {
   // Determines if this module can be resolved in the given context.
   virtual bool evaluateContext(const ResolveContext& context) const KJ_WARN_UNUSED_RESULT;
 
-  // Instantiates the given module. The return value follows the established v8
-  // rules for Maybe. If the returned maybe is empty, then an exception should
+  // Instantiates the given module. If false is returned, then an exception should
   // have been scheduled on the isolate via the lock. Do not throw C++ exceptions
   // from this method unless they are fatal.
-  v8::Maybe<bool> instantiate(Lock& js,
+  bool instantiate(Lock& js,
       v8::Local<v8::Module> module,
       const CompilationObserver& observer) const KJ_WARN_UNUSED_RESULT;
 
@@ -378,7 +377,7 @@ class Module {
         auto ext = js.alloc<T>(js, specifier);
         ns.setDefault(js, ext->getExports(js));
         auto fn = Module::compileEvalFunction(js, source, name,
-            JsObject(wrapper.wrap(js.v8Context(), kj::none, ext.addRef())), observer);
+            JsObject(wrapper.wrap(js, js.v8Context(), kj::none, ext.addRef())), observer);
         fn(js);
         // If there are named exports specified for the module namespace,
         // then we want to examine the ext->getExports() to extract those.
@@ -403,7 +402,8 @@ class Module {
                const Module::ModuleNamespace& ns,
                const CompilationObserver& observer) mutable -> bool {
       Ref<T> instance = factory(js);
-      auto value = TypeWrapper::from(js.v8Isolate).wrap(js.v8Context(), kj::none, kj::mv(instance));
+      auto value =
+          TypeWrapper::from(js.v8Isolate).wrap(js, js.v8Context(), kj::none, kj::mv(instance));
       return ns.setDefault(js, JsValue(value));
     };
   }
@@ -515,7 +515,7 @@ class ModuleBundle {
             [](Lock& js, const Url& specifier, const Module::ModuleNamespace& ns,
                 const CompilationObserver&) {
           auto value = TypeWrapper::from(js.v8Isolate)
-                           .wrap(js.v8Context(), kj::none, js.alloc<T>(js, specifier));
+                           .wrap(js, js.v8Context(), kj::none, js.alloc<T>(js, specifier));
           ns.setDefault(js, JsValue(value));
           return true;
         });

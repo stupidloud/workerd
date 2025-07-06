@@ -1012,6 +1012,9 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
     if (features.getNodeJsCompatV2()) {
       lock->setNodeJsCompatEnabled();
     }
+    if (features.getEnableNodeJsProcessV2()) {
+      lock->setNodeJsProcessV2Enabled();
+    }
     if (features.getThrowOnUnrecognizedImportAssertion()) {
       lock->setThrowOnUnrecognizedImportAssertion();
     }
@@ -1079,8 +1082,8 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
     lock->v8Isolate->SetPromiseRejectCallback([](v8::PromiseRejectMessage message) {
       // TODO(cleanup): IoContext doesn't really need to be involved here. We are trying to call
       // a method of ServiceWorkerGlobalScope, which is the context object. So we should be able to
-      // do something like unwrap(isolate->GetCurrentContext()).emitPromiseRejection(). However, JSG
-      // doesn't currently provide an easy way to do this.
+      // do something like unwrap(lock, isolate->GetCurrentContext()).emitPromiseRejection().
+      // However, JSG doesn't currently provide an easy way to do this.
       if (IoContext::hasCurrent()) {
         try {
           IoContext::current().getCurrentLock().reportPromiseRejectEvent(message);
@@ -1102,9 +1105,8 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
     lock->v8Isolate->SetPromiseCrossContextCallback(
         [](v8::Local<v8::Context> context, v8::Local<v8::Promise> promise,
             v8::Local<v8::Object> tag) -> v8::MaybeLocal<v8::Promise> {
+      auto& js = jsg::Lock::current();
       try {
-        auto& js = jsg::Lock::from(context->GetIsolate());
-
         // Generally this condition is only going to happen when using dynamic imports.
         // It should not be common.
         JSG_REQUIRE(IoContext::hasCurrent(), Error,
@@ -1129,7 +1131,7 @@ Worker::Isolate::Isolate(kj::Own<Api> apiParam,
       } catch (...) {
         auto ex = kj::getCaughtExceptionAsKj();
         KJ_LOG(ERROR, "Setting promise cross context follower failed unexpectedly", ex);
-        jsg::throwInternalError(context->GetIsolate(), kj::mv(ex));
+        jsg::throwInternalError(js.v8Isolate, kj::mv(ex));
         return v8::MaybeLocal<v8::Promise>();
       }
     });
@@ -1227,11 +1229,12 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
     IsolateObserver::StartType startType,
     bool logNewScript,
     kj::Maybe<ValidationErrorReporter&> errorReporter,
-    kj::Maybe<kj::Own<api::pyodide::ArtifactBundler_State>> artifacts)
+    kj::Maybe<kj::Own<api::pyodide::ArtifactBundler_State>> artifacts,
+    SpanParent parentSpan)
     : isolate(kj::mv(isolateParam)),
       id(kj::str(id)),
-      modular(source.is<ModulesSource>()),
-      python(modular && source.get<ModulesSource>().isPython),
+      modular(source.variant.is<ModulesSource>()),
+      python(modular && source.variant.get<ModulesSource>().isPython),
       impl(kj::heap<Impl>()) {
   auto parseMetrics = isolate->metrics->parse(startType);
   // TODO(perf): It could make sense to take an async lock when constructing a script if we
@@ -1319,7 +1322,7 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
 
         try {
           try {
-            KJ_SWITCH_ONEOF(source) {
+            KJ_SWITCH_ONEOF(source.variant) {
               KJ_CASE_ONEOF(script, ScriptSource) {
                 // This path is used for the older, service worker syntax workers.
 
@@ -1352,7 +1355,7 @@ Worker::Script::Script(kj::Own<const Isolate> isolateParam,
                   auto& modules = KJ_ASSERT_NONNULL(impl->moduleContext)->getModuleRegistry();
                   impl->configureDynamicImports(lock, modules);
                   isolate->getApi().compileModules(
-                      lock, modulesSource, *isolate, kj::mv(artifacts));
+                      lock, modulesSource, *isolate, kj::mv(artifacts), kj::mv(parentSpan));
                 }
                 impl->unboundScriptOrMainModule = kj::Path::parse(modulesSource.mainModule);
               }
@@ -3258,7 +3261,10 @@ struct Worker::Actor::Impl {
 
   kj::Maybe<kj::Own<ActorCacheInterface>> actorCache;
 
+  kj::Maybe<jsg::JsRef<jsg::JsObject>> ctxObject;
+
   kj::Maybe<rpc::Container::Client> container;
+  kj::Maybe<FacetManager&> facetManager;
 
   struct NoClass {};
   struct Initializing {};
@@ -3419,12 +3425,14 @@ struct Worker::Actor::Impl {
       kj::Maybe<kj::Own<HibernationManager>> manager,
       kj::Maybe<uint16_t>& hibernationEventType,
       kj::Maybe<rpc::Container::Client> container,
+      kj::Maybe<FacetManager&> facetManager,
       kj::PromiseFulfillerPair<void> paf = kj::newPromiseAndFulfiller<void>())
       : actorId(kj::mv(actorId)),
         makeStorage(kj::mv(makeStorage)),
         metrics(kj::mv(metricsParam)),
         transient(hasTransient),
         container(kj::mv(container)),
+        facetManager(facetManager),
         hooks(loopback->addRef(), timerChannel, *metrics),
         inputGate(hooks),
         outputGate(hooks),
@@ -3475,12 +3483,13 @@ Worker::Actor::Actor(const Worker& worker,
     kj::Own<ActorObserver> metrics,
     kj::Maybe<kj::Own<HibernationManager>> manager,
     kj::Maybe<uint16_t> hibernationEventType,
-    kj::Maybe<rpc::Container::Client> container)
+    kj::Maybe<rpc::Container::Client> container,
+    kj::Maybe<FacetManager&> facetManager)
     : worker(kj::atomicAddRef(worker)),
       tracker(tracker.map([](RequestTracker& tracker) { return tracker.addRef(); })) {
   impl = kj::heap<Impl>(*this, kj::mv(actorId), hasTransient, kj::mv(makeActorCache),
       kj::mv(makeStorage), kj::mv(loopback), timerChannel, kj::mv(metrics), kj::mv(manager),
-      hibernationEventType, kj::mv(container));
+      hibernationEventType, kj::mv(container), facetManager);
 
   KJ_IF_SOME(c, className) {
     KJ_IF_SOME(cls, worker.impl->actorClasses.find(c)) {
@@ -3536,12 +3545,19 @@ kj::Promise<void> Worker::Actor::ensureConstructedImpl(IoContext& context, Actor
       KJ_IF_SOME(c, impl->actorCache) {
         storage = impl->makeStorage(lock, worker->getIsolate().getApi(), *c);
       }
-      auto handler = info.cls(lock,
-          js.alloc<api::DurableObjectState>(js, cloneId(),
-              jsg::JsRef<jsg::JsValue>(
-                  js, KJ_ASSERT_NONNULL(lock.getWorker().impl->ctxExports).addRef(js)),
-              kj::mv(storage), kj::mv(impl->container), containerRunning),
-          KJ_ASSERT_NONNULL(lock.getWorker().impl->env).addRef(js));
+
+      auto ctx = js.alloc<api::DurableObjectState>(js, cloneId(),
+          jsg::JsRef<jsg::JsValue>(
+              js, KJ_ASSERT_NONNULL(lock.getWorker().impl->ctxExports).addRef(js)),
+          kj::mv(storage), kj::mv(impl->container), containerRunning, impl->facetManager);
+
+      auto handler =
+          info.cls(lock, ctx.addRef(), KJ_ASSERT_NONNULL(lock.getWorker().impl->env).addRef(js));
+
+      // Since we JUST passed `ctx` into the class constructor, it definitely has a handle
+      // attached. Let's grab it and stash it to implement getCtx().
+      auto ctxHandle = jsg::JsObject(KJ_ASSERT_NONNULL(ctx.tryGetHandle(js)));
+      impl->ctxObject = jsg::JsRef<jsg::JsObject>(js, ctxHandle);
 
       // HACK: We set handler.env to undefined because we already passed the real env into the
       //   constructor, and we want the handler methods to act like they take just one parameter.
@@ -3626,6 +3642,20 @@ kj::Promise<void> Worker::Actor::onBroken() {
 
 const Worker::Actor::Id& Worker::Actor::getId() {
   return impl->actorId;
+}
+
+bool Worker::Actor::idsEqual(const Id& a, const Id& b) {
+  if (a.which() != b.which()) return false;
+
+  KJ_SWITCH_ONEOF(a) {
+    KJ_CASE_ONEOF(actorId, kj::Own<ActorIdFactory::ActorId>) {
+      return actorId->equals(*b.get<kj::Own<ActorIdFactory::ActorId>>());
+    }
+    KJ_CASE_ONEOF(str, kj::String) {
+      return str == b.get<kj::String>();
+    }
+  }
+  KJ_UNREACHABLE;
 }
 
 Worker::Actor::Id Worker::Actor::cloneId(Worker::Actor::Id& id) {
@@ -3873,6 +3903,14 @@ void Worker::Actor::setIoContext(kj::Own<IoContext> context) {
           .eagerlyEvaluate([](kj::Exception&& e) { LOG_EXCEPTION("actorMetricsFlushLoop", e); });
 }
 
+jsg::JsObject Worker::Actor::getCtx(jsg::Lock& js) {
+  return KJ_REQUIRE_NONNULL(impl->ctxObject).getHandle(js);
+}
+
+jsg::JsValue Worker::Actor::getEnv(jsg::Lock& js) {
+  return jsg::JsValue(KJ_REQUIRE_NONNULL(worker->impl->env).getHandle(js));
+}
+
 kj::Maybe<Worker::Actor::HibernationManager&> Worker::Actor::getHibernationManager() {
   return impl->hibernationManager.map(
       [](kj::Own<HibernationManager>& hib) -> HibernationManager& { return *hib; });
@@ -3911,12 +3949,13 @@ uint Worker::Isolate::getLockSuccessCount() const {
 kj::Own<const Worker::Script> Worker::Isolate::newScript(kj::StringPtr scriptId,
     Script::Source source,
     IsolateObserver::StartType startType,
+    SpanParent parentSpan,
     bool logNewScript,
     kj::Maybe<ValidationErrorReporter&> errorReporter,
     kj::Maybe<kj::Own<api::pyodide::ArtifactBundler_State>> artifacts) const {
   // Script doesn't already exist, so compile it.
   return kj::atomicRefcounted<Script>(kj::atomicAddRef(*this), scriptId, kj::mv(source), startType,
-      logNewScript, errorReporter, kj::mv(artifacts));
+      logNewScript, errorReporter, kj::mv(artifacts), kj::mv(parentSpan));
 }
 
 void Worker::Isolate::completedRequest() const {

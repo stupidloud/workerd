@@ -19,7 +19,7 @@ v8::MaybeLocal<v8::Module> resolveCallback(v8::Local<v8::Context> context,
     v8::Local<v8::String> specifier,
     v8::Local<v8::FixedArray> import_attributes,
     v8::Local<v8::Module> referrer) {
-  auto& js = jsg::Lock::from(context->GetIsolate());
+  auto& js = Lock::current();
   v8::MaybeLocal<v8::Module> result;
 
   // The specification for import attributes strongly recommends that embedders
@@ -47,6 +47,19 @@ v8::MaybeLocal<v8::Module> resolveCallback(v8::Local<v8::Context> context,
     if (isNodeJsCompatEnabled(js)) {
       KJ_IF_SOME(nodeSpec, checkNodeSpecifier(spec)) {
         spec = kj::mv(nodeSpec);
+      }
+    }
+
+    // Handle process module redirection based on enable_nodejs_process_v2 flag
+    if (spec == "node:process") {
+      auto specifierPath =
+          kj::Path::parse(isNodeJsProcessV2Enabled(js) ? "node-internal:public_process"_kj
+                                                       : "node-internal:legacy_process"_kj);
+      KJ_IF_SOME(info,
+          registry->resolve(
+              js, specifierPath, kj::none, ModuleRegistry::ResolveOption::INTERNAL_ONLY)) {
+        result = info.module.getHandle(js.v8Isolate);
+        return;
       }
     }
 
@@ -107,7 +120,7 @@ v8::MaybeLocal<v8::Module> resolveCallback(v8::Local<v8::Context> context,
 // callback; V8 will crash if you try to call `SetSyntheticModuleExport()` from anywhere else.
 v8::MaybeLocal<v8::Value> evaluateSyntheticModuleCallback(
     v8::Local<v8::Context> context, v8::Local<v8::Module> module) {
-  auto& js = Lock::from(context->GetIsolate());
+  auto& js = Lock::current();
   v8::EscapableHandleScope scope(js.v8Isolate);
   v8::MaybeLocal<v8::Value> result;
 
@@ -226,7 +239,7 @@ v8::MaybeLocal<v8::Value> evaluateSyntheticModuleCallback(
   })) {
     // V8 doc comments say in the case of an error, throw the error and return an empty Maybe.
     // I.e. NOT a rejected promise. OK...
-    context->GetIsolate()->ThrowException(makeInternalError(js.v8Isolate, kj::mv(exception)));
+    js.v8Isolate->ThrowException(makeInternalError(js.v8Isolate, kj::mv(exception)));
     result = v8::Local<v8::Promise>();
   }
 

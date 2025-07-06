@@ -45,8 +45,7 @@ import {
   aggregateTwoErrors,
 } from 'node-internal:internal_errors';
 
-import * as process from 'node-internal:process';
-
+import process from 'node:process';
 import { Buffer } from 'node-internal:internal_buffer';
 
 import {
@@ -113,6 +112,25 @@ export function isNodeStream(obj) {
       obj._writableState ||
       (typeof obj.write === 'function' && typeof obj.on === 'function') ||
       (typeof obj.pipe === 'function' && typeof obj.on === 'function'))
+  );
+}
+
+export function isReadableStream(obj) {
+  return !!(
+    obj &&
+    !isNodeStream(obj) &&
+    typeof obj.pipeThrough === 'function' &&
+    typeof obj.getReader === 'function' &&
+    typeof obj.cancel === 'function'
+  );
+}
+
+export function isWritableStream(obj) {
+  return !!(
+    obj &&
+    !isNodeStream(obj) &&
+    typeof obj.getWriter === 'function' &&
+    typeof obj.abort === 'function'
   );
 }
 

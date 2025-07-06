@@ -201,6 +201,10 @@ void Lock::setNodeJsCompatEnabled() {
   IsolateBase::from(v8Isolate).setNodeJsCompatEnabled({}, true);
 }
 
+void Lock::setNodeJsProcessV2Enabled() {
+  IsolateBase::from(v8Isolate).setNodeJsProcessV2Enabled({}, true);
+}
+
 void Lock::setThrowOnUnrecognizedImportAssertion() {
   IsolateBase::from(v8Isolate).setThrowOnUnrecognizedImportAssertion();
 }
@@ -361,7 +365,7 @@ void ExternalMemoryTarget::detach() const {
 }
 
 ExternalMemoryAdjustment ExternalMemoryTarget::getAdjustment(size_t amount) const {
-  return ExternalMemoryAdjustment(kj::atomicAddRef(*this), amount);
+  return ExternalMemoryAdjustment(this->addRefToThis(), amount);
 }
 
 void ExternalMemoryTarget::applyDeferredMemoryUpdate() const {
@@ -383,7 +387,7 @@ ExternalMemoryAdjustment Lock::getExternalMemoryAdjustment(int64_t amount) {
   return IsolateBase::from(v8Isolate).getExternalMemoryAdjustment(amount);
 }
 
-kj::Own<const ExternalMemoryTarget> Lock::getExternalMemoryTarget() {
+kj::Arc<const ExternalMemoryTarget> Lock::getExternalMemoryTarget() {
   return IsolateBase::from(v8Isolate).getExternalMemoryTarget();
 }
 
@@ -416,7 +420,7 @@ void ExternalMemoryAdjustment::maybeDeferAdjustment(ssize_t amount) {
 }
 
 ExternalMemoryAdjustment::ExternalMemoryAdjustment(
-    kj::Own<const ExternalMemoryTarget> externalMemory, size_t amount)
+    kj::Arc<const ExternalMemoryTarget> externalMemory, size_t amount)
     : externalMemory(kj::mv(externalMemory)) {
   maybeDeferAdjustment(amount);
 }

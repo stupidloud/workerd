@@ -7,21 +7,28 @@ interface Fetcher {
 }
 
 export class AutoRAGInternalError extends Error {
-  public constructor(message: string, name = 'AutoRAGInternalError') {
+  constructor(message: string, name = 'AutoRAGInternalError') {
     super(message);
     this.name = name;
   }
 }
 
 export class AutoRAGNotFoundError extends Error {
-  public constructor(message: string, name = 'AutoRAGNotFoundError') {
+  constructor(message: string, name = 'AutoRAGNotFoundError') {
     super(message);
     this.name = name;
   }
 }
 
 export class AutoRAGUnauthorizedError extends Error {
-  public constructor(message: string, name = 'AutoRAGUnauthorizedError') {
+  constructor(message: string, name = 'AutoRAGUnauthorizedError') {
+    super(message);
+    this.name = name;
+  }
+}
+
+export class AutoRAGNameNotSetError extends Error {
+  constructor(message: string, name = 'AutoRAGNameNotSetError') {
     super(message);
     this.name = name;
   }
@@ -94,22 +101,54 @@ export type AutoRagSearchResponse = {
   next_page: string | null;
 };
 
+export type AutoRagListResponse = {
+  id: string;
+  enable: boolean;
+  type: string;
+  source: string;
+  vectorize_name: string;
+  paused: boolean;
+  status: string;
+}[];
+
 export type AutoRagAiSearchResponse = AutoRagSearchResponse & {
   response: string;
 };
 
 export class AutoRAG {
   readonly #fetcher: Fetcher;
-  readonly #autoragId: string;
+  readonly #autoragId: string | null;
 
-  public constructor(fetcher: Fetcher, autoragId: string) {
+  constructor(fetcher: Fetcher, autoragId?: string) {
     this.#fetcher = fetcher;
-    this.#autoragId = autoragId;
+    this.#autoragId = autoragId || null;
   }
 
-  public async search(
-    params: AutoRagSearchRequest
-  ): Promise<AutoRagSearchResponse> {
+  async list(): Promise<AutoRagListResponse> {
+    const res = await this.#fetcher.fetch(
+      `https://workers-binding.ai/autorag/rags`,
+      {
+        method: 'GET',
+        headers: {
+          'content-type': 'application/json',
+        },
+      }
+    );
+
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+
+    const data = (await res.json()) as { result: AutoRagListResponse };
+
+    return data.result;
+  }
+
+  async search(params: AutoRagSearchRequest): Promise<AutoRagSearchResponse> {
+    if (!this.#autoragId) {
+      throw new AutoRAGNameNotSetError('AutoRAG name not defined');
+    }
+
     const res = await this.#fetcher.fetch(
       `https://workers-binding.ai/autorag/rags/${this.#autoragId}/search`,
       {
@@ -139,15 +178,17 @@ export class AutoRAG {
     return data.result;
   }
 
-  public async aiSearch(
-    params: AutoRagAiSearchRequestStreaming
-  ): Promise<Response>;
-  public async aiSearch(
+  async aiSearch(params: AutoRagAiSearchRequestStreaming): Promise<Response>;
+  async aiSearch(
     params: AutoRagAiSearchRequest
   ): Promise<AutoRagAiSearchResponse>;
-  public async aiSearch(
+  async aiSearch(
     params: AutoRagAiSearchRequest
   ): Promise<AutoRagAiSearchResponse | Response> {
+    if (!this.#autoragId) {
+      throw new AutoRAGNameNotSetError('AutoRAG name not defined');
+    }
+
     const res = await this.#fetcher.fetch(
       `https://workers-binding.ai/autorag/rags/${this.#autoragId}/ai-search`,
       {

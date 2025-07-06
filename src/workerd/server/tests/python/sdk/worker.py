@@ -417,6 +417,10 @@ async def response_unit_tests(env):
     response_json = Response.json("test", headers={"Content-Type": "42"})
     assert response_json.headers.get("content-type") == "42"
 
+    response_none = Response(None, status=204)
+    assert response_none.status == 204
+    assert response_none.body is None
+
     class Test:
         def __init__(self, x):
             self.x = x
@@ -441,6 +445,12 @@ async def response_unit_tests(env):
         raise ValueError("Should have raised")  # noqa: TRY301
     except Exception as err:
         assert str(err) == "Unsupported type in Response: Test"
+
+    response_ws = Response(
+        "test", status=201, web_socket=js.WebSocket.new("ws://example.com")
+    )
+    # TODO: it doesn't seem possible to access webSocket even in JS
+    assert response_ws.status == 201
 
 
 async def test(ctrl, env):

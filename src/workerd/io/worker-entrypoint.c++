@@ -280,7 +280,7 @@ kj::Promise<void> WorkerEntrypoint::request(kj::HttpMethod method,
     };
 
     t.setEventInfo(context.getInvocationSpanContext(), timestamp,
-        tracing::FetchEventInfo(method, kj::str(url), kj::str(cfJson), kj::mv(traceHeadersArray)));
+        tracing::FetchEventInfo(method, kj::str(url), kj::mv(cfJson), kj::mv(traceHeadersArray)));
   }
 
   auto metricsForCatch = kj::addRef(incomingRequest->getMetrics());
@@ -710,6 +710,9 @@ kj::Promise<bool> WorkerEntrypoint::test() {
   incomingRequest->delivered();
 
   auto& context = incomingRequest->getContext();
+  KJ_IF_SOME(t, context.getWorkerTracer()) {
+    t.setEventInfo(context.getInvocationSpanContext(), context.now(), tracing::CustomEventInfo());
+  }
 
   context.addWaitUntil(context.run([entrypointName = entrypointName, props = kj::mv(props),
                                        &context, &metrics = incomingRequest->getMetrics()](
@@ -726,6 +729,21 @@ kj::Promise<bool> WorkerEntrypoint::test() {
       [](IoContext& context, kj::Own<IoContext::IncomingRequest> request) -> kj::Promise<bool> {
     TRACE_EVENT("workerd", "WorkerEntrypoint::test() waitForFinished()");
     auto result = co_await request->finishScheduled();
+
+    if (result == IoContext_IncomingRequest::FinishScheduledResult::ABORTED) {
+      // If the test handler throws an exception (without aborting - just a regular exception),
+      // then `outcome` ends up being EventOutcome::EXCEPTION, which causes us to return false.
+      // But in that case we are separately relying on the exception being logged as an uncaught
+      // exception, rather than throwing it.
+      // This is why we don't rethrow the exception but rather log it as an uncaught exception.
+      try {
+        co_await context.onAbort();
+      } catch (...) {
+        auto exception = kj::getCaughtExceptionAsKj();
+        KJ_LOG(ERROR, exception);
+      }
+    }
+
     bool completed = result == IoContext_IncomingRequest::FinishScheduledResult::COMPLETED;
     auto outcome = completed ? context.waitUntilStatus() : EventOutcome::EXCEEDED_CPU;
     co_return outcome == EventOutcome::OK;

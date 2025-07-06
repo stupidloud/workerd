@@ -791,7 +791,7 @@ jsg::JsValue ServiceWorkerGlobalScope::structuredClone(
 TimeoutId::NumberType ServiceWorkerGlobalScope::setTimeoutInternal(
     jsg::Function<void()> function, double msDelay) {
   auto timeoutId = IoContext::current().setTimeoutImpl(timeoutIdGenerator,
-      /** repeats = */ false, kj::mv(function), msDelay);
+      /* repeat */ false, kj::mv(function), msDelay);
   return timeoutId.toNumber();
 }
 
@@ -900,13 +900,21 @@ jsg::JsValue ServiceWorkerGlobalScope::getBuffer(jsg::Lock& js) {
 }
 
 jsg::JsValue ServiceWorkerGlobalScope::getProcess(jsg::Lock& js) {
-  constexpr auto kSpecifier = "node:process"_kj;
-  KJ_IF_SOME(module, js.resolveModule(kSpecifier)) {
+  // Handle process module redirection based on enable_nodejs_process_v2 flag
+  auto specifier = ([&]() -> kj::StringPtr {
+    if (FeatureFlags::get(js).getEnableNodeJsProcessV2()) {
+      return "node-internal:public_process"_kj;
+    } else {
+      return "node-internal:legacy_process"_kj;
+    }
+  })();
+
+  KJ_IF_SOME(module, js.resolveInternalModule(specifier)) {
     auto def = module.get(js, "default"_kj);
     JSG_REQUIRE(def.isObject(), TypeError, "Invalid node:process implementation");
     return def;
   } else {
-    // If we are unable to resolve the node:process module here, it likely
+    // If we are unable to resolve the internal module here, it likely
     // means that we don't actually have a module registry installed. Just
     // return undefined in this case.
     return js.undefined();
@@ -976,7 +984,7 @@ jsg::Ref<Immediate> ServiceWorkerGlobalScope::setImmediate(jsg::Lock& js,
     function(js, kj::mv(args));
   };
   auto timeoutId = context.setTimeoutImpl(timeoutIdGenerator,
-      /* repeats = */ false, [function = kj::mv(fn)](jsg::Lock& js) mutable { function(js); }, 0);
+      /* repeat */ false, [function = kj::mv(fn)](jsg::Lock& js) mutable { function(js); }, 0);
   return js.alloc<Immediate>(context, timeoutId);
 }
 

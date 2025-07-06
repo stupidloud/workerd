@@ -2,28 +2,11 @@
   "$schema": "deps.schema.json",
   "repositories": [
     {
-      "name": "bazel_skylib",
-      "type": "github_release",
-      "owner": "bazelbuild",
-      "repo": "bazel-skylib",
-      "file_regex": "^bazel-skylib-[0-9\\.]+\\.tar\\.gz$"
-    },
-    {
       "name": "rules_python",
       "type": "github_release",
       "owner": "bazelbuild",
       "repo": "rules_python",
       "file_regex": "^rules_python-.*\\.tar\\.gz$"
-    },
-    {
-      // Previously used to allow building dawn on macOS – while the build should succeed with the
-      // default Linux toolchain configuration from rules_cc apple_support is still more tailored to
-      // macOS. Note that this needs to be pulled in before rules_cc for this toolchain to be used.
-      "name": "build_bazel_apple_support",
-      "type": "github_release",
-      "owner": "bazelbuild",
-      "repo": "apple_support",
-      "file_regex": "^apple_support\\..*\\.tar\\.gz$"
     },
     // rust
     {
@@ -111,40 +94,12 @@
       "repo": "rules_ts",
       "file_regex": "^rules_ts-.*\\.tar\\.gz$"
     },
-    //clang-format
-    {
-      "name": "clang-format-linux-amd64",
-      "type": "github_release",
-      "owner": "cloudflare",
-      "repo": "workerd-tools",
-      "file_regex": "llvm-.*-linux-amd64-clang-format",
-      "file_type": "executable",
-      "freeze_version": "llvm-18.1.8"
-    },
-    {
-      "name": "clang-format-linux-arm64",
-      "type": "github_release",
-      "owner": "cloudflare",
-      "repo": "workerd-tools",
-      "file_regex": "llvm-.*-linux-arm64-clang-format",
-      "file_type": "executable",
-      "freeze_version": "llvm-18.1.8"
-    },
-    {
-      "name": "clang-format-darwin-arm64",
-      "type": "github_release",
-      "owner": "cloudflare",
-      "repo": "workerd-tools",
-      "file_regex": "llvm-.*-darwin-arm64-clang-format",
-      "file_type": "executable",
-      "freeze_version": "llvm-18.1.8"
-    },
     // microbenchmark
     {
       "type": "github_release",
-      "name": "com_google_benchmark",
-      "owner": "google",
-      "repo": "benchmark"
+      "name": "codspeed",
+      "owner": "CodSpeedHQ",
+      "repo": "codspeed-cpp"
     }
   ]
 }

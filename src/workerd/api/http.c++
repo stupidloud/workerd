@@ -190,7 +190,7 @@ bool Headers::hasLowerCase(kj::StringPtr name) {
     KJ_DREQUIRE(!('A' <= c && c <= 'Z'));
   }
 #endif
-  return headers.find(name) != headers.end();
+  return headers.contains(name);
 }
 
 kj::Array<Headers::DisplayedHeader> Headers::getDisplayedHeaders(jsg::Lock& js) {
@@ -306,7 +306,7 @@ kj::ArrayPtr<jsg::ByteString> Headers::getAll(jsg::ByteString name) {
 
 bool Headers::has(jsg::ByteString name) {
   requireValidHeaderName(name);
-  return headers.find(toLower(kj::mv(name))) != headers.end();
+  return headers.contains(toLower(kj::mv(name)));
 }
 
 void Headers::set(jsg::Lock& js, jsg::ByteString name, jsg::ByteString value) {
@@ -1246,21 +1246,20 @@ kj::Maybe<kj::String> Request::serializeCfBlobJson(jsg::Lock& js) {
     case CacheMode::NOSTORE:
       ttl = -1;
       obj.set(js, "cacheLevel", js.str("bypass"_kjc));
+      if (obj.has(js, "cacheTtl")) {
+        jsg::JsValue oldTtl = obj.get(js, "cacheTtl");
+        JSG_REQUIRE(oldTtl == js.num(ttl), TypeError,
+            kj::str("CacheTtl: ", oldTtl, ", is not compatible with cache: ",
+                getCacheModeName(cacheMode).orDefault("none"_kj), " header."));
+      } else {
+        obj.set(js, "cacheTtl", js.num(ttl));
+      }
       break;
     case CacheMode::NOCACHE:
-      ttl = 0;
+      obj.set(js, "cacheForceRevalidate", js.boolean(true));
       break;
     case CacheMode::NONE:
       KJ_UNREACHABLE;
-  }
-
-  if (obj.has(js, "cacheTtl")) {
-    jsg::JsValue oldTtl = obj.get(js, "cacheTtl");
-    JSG_REQUIRE(oldTtl == js.num(ttl), TypeError,
-        kj::str("CacheTtl: ", oldTtl, ", is not compatible with cache: ",
-            getCacheModeName(cacheMode).orDefault("none"_kj), " header."));
-  } else {
-    obj.set(js, "cacheTtl", js.num(ttl));
   }
 
   return clone.serialize(js);
@@ -1295,59 +1294,59 @@ void Request::serialize(jsg::Lock& js,
   // Our strategy is to construct an initializer dict object and serialize that as a JS object.
   // This makes the deserialization end really simple (just call the constructor), and it also
   // gives us extensibility: we can add new fields without having to bump the serialization tag.
-  serializer.write(js,
-      jsg::JsValue(initDictHandler.wrap(js,
-          RequestInitializerDict{
-            // GET is the default, so only serialize the method if it's something else.
-            .method = method == kj::HttpMethod::GET ? jsg::Optional<kj::String>() : kj::str(method),
+  // clang-format off
+  serializer.write(js, jsg::JsValue(initDictHandler.wrap(js, RequestInitializerDict{
+    // GET is the default, so only serialize the method if it's something else.
+    .method = method == kj::HttpMethod::GET ? jsg::Optional<kj::String>() : kj::str(method),
 
-            .headers = headers.addRef(),
+    .headers = headers.addRef(),
 
-            .body = getBody().map([](jsg::Ref<ReadableStream> stream) -> Body::Initializer {
-    // jsg::Ref<ReadableStream> is one of the possible variants of Body::Initializer.
-    return kj::mv(stream);
-  }),
+    .body = getBody().map([](jsg::Ref<ReadableStream> stream) -> Body::Initializer {
+      // jsg::Ref<ReadableStream> is one of the possible variants of Body::Initializer.
+      return kj::mv(stream);
+    }),
 
-            // "manual" is the default for `redirect`, so only encode if it's not that.
-            .redirect = redirect == Redirect::MANUAL ? kj::str(getRedirect())
-                                                     : kj::Maybe<kj::String>(kj::none),
+    // "manual" is the default for `redirect`, so only encode if it's not that.
+    .redirect = redirect == Redirect::MANUAL ? kj::str(getRedirect())
+                                              : kj::Maybe<kj::String>(kj::none),
 
-            // We have to ignore .fetcher for serialization. We can't simply fail if a fetcher is present
-            // because requests received by the top-level fetch handler actually have .fetcher set to
-            // the hidden "next" binding, which historically could be different from null (although in
-            // practice these days it is always the same). We obviously want to be able to serialize
-            // requests received by the top-level fetch handler so... we have to ignore this. This
-            // property should probably go away in any case.
+    // We have to ignore .fetcher for serialization. We can't simply fail if a fetcher is present
+    // because requests received by the top-level fetch handler actually have .fetcher set to
+    // the hidden "next" binding, which historically could be different from null (although in
+    // practice these days it is always the same). We obviously want to be able to serialize
+    // requests received by the top-level fetch handler so... we have to ignore this. This
+    // property should probably go away in any case.
 
-            .cf = cf.getRef(js),
+    .cf = cf.getRef(js),
 
-            .cache = getCacheModeName(cacheMode).map(
-                [](kj::StringPtr name) -> kj::String { return kj::str(name); }),
+    .cache = getCacheModeName(cacheMode).map(
+        [](kj::StringPtr name) -> kj::String { return kj::str(name); }),
 
-            // .mode is unimplemented
-            // .credentials is unimplemented
-            // .referrer is unimplemented
-            // .referrerPolicy is unimplemented
-            // .integrity is required to be empty
+    // .mode is unimplemented
+    // .credentials is unimplemented
+    // .referrer is unimplemented
+    // .referrerPolicy is unimplemented
+    // .integrity is required to be empty
 
-            // If an AbortSignal is present, we'll try to serialize it. As of this writing, AbortSignal
-            // is not serializable, but we could add support for sending it over RPC in the future.
-            //
-            // Note we have to double-Maybe this, so that if no signal is present, the property is absent
-            // instead of `null`.
-            .signal =
-                signal.map([&js](jsg::Ref<AbortSignal>& s) -> kj::Maybe<jsg::Ref<AbortSignal>> {
-    if (s->isIgnoredForSubrequests(js)) {
-      return kj::none;
-    }
+    // If an AbortSignal is present, we'll try to serialize it. As of this writing, AbortSignal
+    // is not serializable, but we could add support for sending it over RPC in the future.
+    //
+    // Note we have to double-Maybe this, so that if no signal is present, the property is absent
+    // instead of `null`.
+    .signal =
+        signal.map([&js](jsg::Ref<AbortSignal>& s) -> kj::Maybe<jsg::Ref<AbortSignal>> {
+      if (s->isIgnoredForSubrequests(js)) {
+        return kj::none;
+      }
 
-    return s.addRef();
-  }),
+      return s.addRef();
+    }),
 
-            // Only serialize responseBodyEncoding if it's not the default AUTO
-            .encodeResponseBody = responseBodyEncoding == Response_BodyEncoding::AUTO
-                ? jsg::Optional<kj::String>()
-                : kj::str("manual")})));
+    // Only serialize responseBodyEncoding if it's not the default AUTO
+    .encodeResponseBody = responseBodyEncoding == Response_BodyEncoding::AUTO
+        ? jsg::Optional<kj::String>()
+        : kj::str("manual")
+  })));
 }
 
 jsg::Ref<Request> Request::deserialize(jsg::Lock& js,
@@ -2511,7 +2510,6 @@ jsg::Promise<void> Fetcher::delete_(jsg::Lock& js, kj::String url) {
 jsg::Promise<Fetcher::QueueResult> Fetcher::queue(
     jsg::Lock& js, kj::String queueName, kj::Array<ServiceBindingQueueMessage> messages) {
   auto& ioContext = IoContext::current();
-  auto worker = getClient(ioContext, kj::none, "queue"_kjc);
 
   auto encodedMessages = kj::heapArrayBuilder<IncomingQueueMessage>(messages.size());
   for (auto& msg: messages) {
@@ -2538,6 +2536,8 @@ jsg::Promise<Fetcher::QueueResult> Fetcher::queue(
     }
   }
 
+  // Only create worker interface after the error checks above to reduce overhead in case of errors.
+  auto worker = getClient(ioContext, kj::none, "queue"_kjc);
   auto event = kj::refcounted<api::QueueCustomEventImpl>(QueueEvent::Params{
     .queueName = kj::mv(queueName),
     .messages = encodedMessages.finish(),
@@ -2595,6 +2595,21 @@ kj::Own<WorkerInterface> Fetcher::getClient(
     }
     KJ_CASE_ONEOF(outgoingFactory, kj::Own<CrossContextOutgoingFactory>) {
       return outgoingFactory->newSingleUseClient(ioContext, kj::mv(cfStr));
+    }
+  }
+  KJ_UNREACHABLE;
+}
+
+kj::Own<IoChannelFactory::SubrequestChannel> Fetcher::getSubrequestChannel(IoContext& ioContext) {
+  KJ_SWITCH_ONEOF(channelOrClientFactory) {
+    KJ_CASE_ONEOF(channel, uint) {
+      return ioContext.getIoChannelFactory().getSubrequestChannel(channel);
+    }
+    KJ_CASE_ONEOF(outgoingFactory, IoOwn<OutgoingFactory>) {
+      return outgoingFactory->getSubrequestChannel();
+    }
+    KJ_CASE_ONEOF(outgoingFactory, kj::Own<CrossContextOutgoingFactory>) {
+      return outgoingFactory->getSubrequestChannel(ioContext);
     }
   }
   KJ_UNREACHABLE;

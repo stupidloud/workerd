@@ -25,6 +25,7 @@
 #include <workerd/api/modules.h>
 #include <workerd/api/node/node.h>
 #include <workerd/api/pyodide/pyodide.h>
+#include <workerd/api/pyodide/requirements.h>
 #include <workerd/api/pyodide/setup-emscripten.h>
 #include <workerd/api/queue.h>
 #include <workerd/api/r2-admin.h>
@@ -39,6 +40,7 @@
 #include <workerd/api/url-standard.h>
 #include <workerd/api/urlpattern-standard.h>
 #include <workerd/api/urlpattern.h>
+#include <workerd/api/worker-loader.h>
 #include <workerd/io/compatibility-date.h>
 #include <workerd/io/promise-wrapper.h>
 #include <workerd/jsg/jsg.h>
@@ -53,6 +55,7 @@
 
 #include <pyodide/generated/pyodide_extra.capnp.h>
 
+#include <kj/compat/gzip.h>
 #include <kj/compat/http.h>
 #include <kj/compat/tls.h>
 #include <kj/compat/url.h>
@@ -109,12 +112,14 @@ JSG_DECLARE_ISOLATE_TYPE(JsgWorkerdIsolate,
     EW_URLPATTERN_ISOLATE_TYPES,
     EW_URLPATTERN_STANDARD_ISOLATE_TYPES,
     EW_WEB_FILESYSTEM_ISOLATE_TYPE,
+    EW_FILESYSTEM_ISOLATE_TYPES,
     EW_WEBSOCKET_ISOLATE_TYPES,
     EW_SQL_ISOLATE_TYPES,
     EW_NODE_ISOLATE_TYPES,
     EW_RTTI_ISOLATE_TYPES,
     EW_HYPERDRIVE_ISOLATE_TYPES,
     EW_EVENTSOURCE_ISOLATE_TYPES,
+    EW_WORKER_LOADER_ISOLATE_TYPES,
     workerd::api::EnvModule,
 
     jsg::TypeWrapperExtension<PromiseWrapper>,
@@ -266,9 +271,7 @@ kj::Own<api::pyodide::PyodideMetadataReader::State> makePyodideMetadataReader(
     false     /* isTracing */,
     snapshotToDisk,
     pythonConfig.createBaselineSnapshot,
-    kj::mv(memorySnapshot),
-    KJ_MAP(c, source.inferredActorClassesForPython) { return kj::str(c); },
-    KJ_MAP(c, source.inferredEntrypointClassesForPython) { return kj::str(c); }
+    kj::mv(memorySnapshot)
   );
   // clang-format on
 }
@@ -332,6 +335,27 @@ kj::Maybe<jsg::Bundle::Reader> fetchPyodideBundle(
   return pyConfig.pyodideBundleManager.getPyodideBundle(version);
 }
 
+/**
+ * This function matches the implementation of `getPythonRequirements` in the internal repo. But it
+ * works on the workerd ModulesSource definition rather than the WorkerBundle.
+ */
+kj::Array<kj::String> getPythonRequirements(const Worker::Script::ModulesSource& source) {
+  kj::Vector<kj::String> requirements;
+
+  for (auto& def: source.modules) {
+    KJ_SWITCH_ONEOF(def.content) {
+      KJ_CASE_ONEOF(content, Worker::Script::PythonRequirement) {
+        requirements.add(api::pyodide::canonicalizePythonPackageName(def.name));
+      }
+      KJ_CASE_ONEOF_DEFAULT {
+        break;
+      }
+    }
+  }
+
+  return requirements.releaseAsArray();
+}
+
 struct WorkerdApi::Impl final {
   kj::Own<CompatibilityFlags::Reader> features;
   capnp::List<config::Extension>::Reader extensions;
@@ -341,7 +365,6 @@ struct WorkerdApi::Impl final {
   JsgWorkerdIsolate jsgIsolate;
   api::MemoryCacheProvider& memoryCacheProvider;
   const PythonConfig& pythonConfig;
-  kj::Maybe<api::pyodide::EmscriptenRuntime> maybeEmscriptenRuntime;
 
   class Configuration {
    public:
@@ -388,18 +411,6 @@ struct WorkerdApi::Impl final {
       // case we also need to tell JSG.
       if (maybeOwnedModuleRegistry != kj::none) {
         jsgIsolate.setUsingNewModuleRegistry();
-      }
-      if (features->getPythonWorkers()) {
-        auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(*features));
-        auto version = getPythonBundleName(pythonRelease);
-        auto bundle = KJ_ASSERT_NONNULL(
-            fetchPyodideBundle(pythonConfig, version), "Failed to get Pyodide bundle");
-        jsg::NewContextOptions options{.enableWeakRef = features->getJsWeakRef()};
-        auto context = lock.newContext<api::ServiceWorkerGlobalScope>(options);
-        v8::Context::Scope scope(context.getHandle(lock));
-        // Init emscripten synchronously, the python script will import setup-emscripten and
-        // call setEmscriptenModele
-        maybeEmscriptenRuntime = api::pyodide::EmscriptenRuntime::initialize(lock, true, bundle);
       }
     });
   }
@@ -540,27 +551,6 @@ Worker::Script::Source WorkerdApi::extractSource(kj::StringPtr name,
 
       Worker::Script::ModulesSource result{
         .mainModule = modules[0].getName(), .modules = kj::mv(moduleArray), .isPython = isPython};
-
-      if (isPython) {
-        // Special hack for Python: Infer the set of exported classes based on whan the config
-        // references.
-        result.inferredActorClassesForPython =
-            KJ_MAP(objectNamespace, conf.getDurableObjectNamespaces()) {
-          return kj::str(objectNamespace.getClassName());
-        };
-
-        // To get the entrypoint classes, we iterate through bindings looking for services with
-        // entrypoint field set. This doesn't allow us to discern between worker entrypoints and
-        // workflow entrypoints, but is the best we can do until we rewrite how workerd loads
-        // packages.
-        auto entrypointClasses = kj::Vector<kj::String>();
-        for (auto binding: conf.getBindings()) {
-          if (binding.isService() && binding.getService().hasEntrypoint()) {
-            entrypointClasses.add(kj::str(binding.getService().getEntrypoint()));
-          }
-        }
-        result.inferredEntrypointClassesForPython = entrypointClasses.releaseAsArray();
-      }
 
       return result;
     }
@@ -728,7 +718,8 @@ Worker::Script::Module WorkerdApi::readModuleConf(config::Worker::Module::Reader
 void WorkerdApi::compileModules(jsg::Lock& lockParam,
     const Worker::Script::ModulesSource& source,
     const Worker::Isolate& isolate,
-    kj::Maybe<kj::Own<api::pyodide::ArtifactBundler_State>> artifacts) const {
+    kj::Maybe<kj::Own<api::pyodide::ArtifactBundler_State>> artifacts,
+    SpanParent parentSpan) const {
   TRACE_EVENT("workerd", "WorkerdApi::compileModules()");
   lockParam.withinHandleScope([&] {
     auto modules = jsg::ModuleRegistryImpl<JsgWorkerdIsolate_TypeWrapper>::from(lockParam);
@@ -738,15 +729,26 @@ void WorkerdApi::compileModules(jsg::Lock& lockParam,
     if (source.isPython) {
       KJ_REQUIRE(featureFlags.getPythonWorkers(),
           "The python_workers compatibility flag is required to use Python.");
-      // Inject SetupEmscripten module
-      modules->addBuiltinModule("internal:setup-emscripten",
-          lockParam.alloc<SetupEmscripten>(KJ_ASSERT_NONNULL(impl->maybeEmscriptenRuntime)),
-          workerd::jsg::ModuleRegistry::Type::INTERNAL);
-
       auto pythonRelease = KJ_ASSERT_NONNULL(getPythonSnapshotRelease(featureFlags));
       auto version = getPythonBundleName(pythonRelease);
       auto bundle = KJ_ASSERT_NONNULL(
           fetchPyodideBundle(impl->pythonConfig, version), "Failed to get Pyodide bundle");
+      // Inject SetupEmscripten module
+      {
+        auto emscriptenRuntime =
+            api::pyodide::EmscriptenRuntime::initialize(lockParam, true, bundle);
+        modules->addBuiltinModule("internal:setup-emscripten",
+            jsg::alloc<SetupEmscripten>(kj::mv(emscriptenRuntime)),
+            workerd::jsg::ModuleRegistry::Type::INTERNAL);
+      }
+
+      // Get Python requirements and fetch packages
+      KJ_IF_SOME(a, artifacts) {
+        KJ_IF_SOME(pm, a->packageManager) {
+          auto pythonRequirements = getPythonRequirements(source);
+          fetchPyodidePackages(impl->pythonConfig, pm, pythonRequirements, pythonRelease);
+        }
+      }
 
       // Inject Pyodide bundle
       modules->addBuiltinBundle(bundle, kj::none);
@@ -968,6 +970,16 @@ static v8::Local<v8::Value> createBindingValue(JsgWorkerdIsolate::Lock& lock,
     KJ_CASE_ONEOF(unsafe, Global::UnsafeEval) {
       value = lock.wrap(context, lock.alloc<api::UnsafeEval>());
     }
+
+    KJ_CASE_ONEOF(actorClass, Global::ActorClass) {
+      value = lock.wrap(context, lock.alloc<api::DurableObjectClass>(actorClass.channel));
+    }
+
+    KJ_CASE_ONEOF(workerLoader, Global::WorkerLoader) {
+      value = lock.wrap(context,
+          lock.alloc<api::WorkerLoader>(
+              workerLoader.channel, CompatibilityDateValidation::CODE_VERSION));
+    }
   }
 
   return value;
@@ -1054,16 +1066,16 @@ WorkerdApi::Global WorkerdApi::Global::clone() const {
     KJ_CASE_ONEOF(unsafe, Global::UnsafeEval) {
       result.value = Global::UnsafeEval{};
     }
+
+    KJ_CASE_ONEOF(actorClass, Global::ActorClass) {
+      result.value = actorClass.clone();
+    }
+    KJ_CASE_ONEOF(workerLoader, Global::WorkerLoader) {
+      result.value = workerLoader.clone();
+    }
   }
 
   return result;
-}
-
-kj::Maybe<const api::pyodide::EmscriptenRuntime&> WorkerdApi::getEmscriptenRuntime() const {
-  return impl->maybeEmscriptenRuntime.map(
-      [](auto& emscriptenRuntime) -> const api::pyodide::EmscriptenRuntime& {
-    return emscriptenRuntime;
-  });
 }
 
 const WorkerdApi& WorkerdApi::from(const Worker::Api& api) {
@@ -1083,7 +1095,8 @@ kj::Own<jsg::modules::ModuleRegistry> WorkerdApi::initializeBundleModuleRegistry
     const PythonConfig& pythonConfig,
     const jsg::Url& bundleBase,
     capnp::List<config::Extension>::Reader extensions,
-    kj::Maybe<kj::String> maybeFallbackService) {
+    kj::Maybe<kj::String> maybeFallbackService,
+    kj::Maybe<kj::Own<api::pyodide::ArtifactBundler_State>> artifacts) {
   jsg::modules::ModuleRegistry::Builder builder(
       observer, bundleBase, jsg::modules::ModuleRegistry::Builder::Options::ALLOW_FALLBACK);
 
@@ -1224,6 +1237,14 @@ kj::Own<jsg::modules::ModuleRegistry> WorkerdApi::initializeBundleModuleRegistry
       auto bundle = KJ_ASSERT_NONNULL(
           fetchPyodideBundle(pythonConfig, version), "Failed to get Pyodide bundle");
 
+      // Get Python requirements and fetch packages
+      KJ_IF_SOME(a, artifacts) {
+        KJ_IF_SOME(pm, a->packageManager) {
+          auto pythonRequirements = getPythonRequirements(source);
+          fetchPyodidePackages(pythonConfig, pm, pythonRequirements, pythonRelease);
+        }
+      }
+
       // We end up add modules from the bundle twice, once to get BUILTIN modules
       // and again to get the BUILTIN_ONLY modules. These end up in two different
       // module bundles.
@@ -1246,10 +1267,9 @@ kj::Own<jsg::modules::ModuleRegistry> WorkerdApi::initializeBundleModuleRegistry
       pyodideBundleBuilder.addSynthetic(bootrapSpecifier,
           jsg::modules::Module::newJsgObjectModuleHandler<api::pyodide::SetupEmscripten,
               JsgWorkerdIsolate_TypeWrapper>(
-              [](jsg::Lock& js) mutable -> jsg::Ref<api::pyodide::SetupEmscripten> {
-        auto& api = Worker::Api::current();
-        return js.alloc<api::pyodide::SetupEmscripten>(
-            KJ_ASSERT_NONNULL(api.getEmscriptenRuntime()));
+              [bundle](jsg::Lock& js) mutable -> jsg::Ref<api::pyodide::SetupEmscripten> {
+        auto emscriptenRuntime = api::pyodide::EmscriptenRuntime::initialize(js, true, bundle);
+        return js.alloc<api::pyodide::SetupEmscripten>(kj::mv(emscriptenRuntime));
       }));
 
       pyodideBundleBuilder.addEsm(tarReaderSpecifier, PYTHON_TAR_READER);

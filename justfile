@@ -31,7 +31,7 @@ test-asan *args="//...":
 
 # e.g. just stream-test //src/cloudflare:cloudflare.capnp@eslint
 stream-test *args:
-  bazel test {{args}} --test_output=streamed --cache_test_results=no --config=debug
+  bazel test {{args}} --test_output=streamed --cache_test_results=no --config=debug --test_tag_filters= --test_size_filters=
 
 # e.g. just node-test zlib
 node-test test_name *args:
@@ -91,6 +91,9 @@ generate-types:
   cp -r bazel-bin/types/definitions/latest types/generated-snapshot/
   cp -r bazel-bin/types/definitions/experimental types/generated-snapshot/
 
+update-reported-node-version:
+  python3 tools/update_node_version.py src/workerd/api/node/node-version.h
+
 # called by rust-analyzer discoverConfig (quiet recipe with no output)
 @_rust-analyzer:
   rm -rf ./rust-project.json
@@ -99,3 +102,6 @@ generate-types:
 
 create-external:
   tools/unix/create-external.sh
+
+bench-all:
+  bazel query 'deps(//src/workerd/tests:all_benchmarks, 1)' --output=label | grep -v 'all_benchmarks' | xargs -I {} bazel run --config=benchmark {}

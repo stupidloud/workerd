@@ -363,6 +363,13 @@ class JsObject final: public JsBase<v8::Object, JsObject> {
   void set(Lock& js, kj::StringPtr name, const JsValue& value);
   void setReadOnly(Lock& js, kj::StringPtr name, const JsValue& value);
   void setNonEnumerable(Lock& js, const JsSymbol& name, const JsValue& value);
+
+  // Like set but uses the defineProperty API instead in order to override
+  // the default property attributes. This is useful for defining properties
+  // that otherwise would not be normally settable, such as the name of an
+  // error object.
+  void defineProperty(Lock& js, kj::StringPtr name, const JsValue& value);
+
   JsValue get(Lock& js, const JsValue& name) KJ_WARN_UNUSED_RESULT;
   JsValue get(Lock& js, kj::StringPtr name) KJ_WARN_UNUSED_RESULT;
 
@@ -604,27 +611,28 @@ struct JsValueWrapper {
   }
 
 #define V(Name)                                                                                    \
-  v8::Local<v8::Name> wrap(                                                                        \
-      v8::Local<v8::Context> context, kj::Maybe<v8::Local<v8::Object>> creator, Js##Name value) {  \
+  v8::Local<v8::Name> wrap(jsg::Lock& js, v8::Local<v8::Context> context,                          \
+      kj::Maybe<v8::Local<v8::Object>> creator, Js##Name value) {                                  \
     return value;                                                                                  \
   }                                                                                                \
-  v8::Local<v8::Name> wrap(v8::Local<v8::Context> context,                                         \
+  v8::Local<v8::Name> wrap(jsg::Lock& js, v8::Local<v8::Context> context,                          \
       kj::Maybe<v8::Local<v8::Object>> creator, JsRef<Js##Name> value) {                           \
-    return value.getHandle(Lock::from(context->GetIsolate()));                                     \
+    return value.getHandle(js);                                                                    \
   }
 
   TYPES_TO_WRAP(V)
 #undef V
 
   template <typename T, typename = kj::EnableIf<std::is_assignable_v<JsValue, T>>>
-  kj::Maybe<T> tryUnwrap(v8::Local<v8::Context> context,
+  kj::Maybe<T> tryUnwrap(Lock& js,
+      v8::Local<v8::Context> context,
       v8::Local<v8::Value> handle,
       T*,
       kj::Maybe<v8::Local<v8::Object>> parentObject) {
     if constexpr (kj::isSameType<T, JsString>()) {
       return T(check(handle->ToString(context)));
     } else if constexpr (kj::isSameType<T, JsBoolean>()) {
-      return T(handle->ToBoolean(context->GetIsolate()));
+      return T(handle->ToBoolean(js.v8Isolate));
     } else if constexpr (kj::isSameType<T, JsNumber>()) {
       return T(check(handle->ToNumber(context)));
     } else {
@@ -637,14 +645,14 @@ struct JsValueWrapper {
   }
 
   template <typename T, typename = kj::EnableIf<std::is_assignable_v<JsValue, T>>>
-  kj::Maybe<JsRef<T>> tryUnwrap(v8::Local<v8::Context> context,
+  kj::Maybe<JsRef<T>> tryUnwrap(Lock& js,
+      v8::Local<v8::Context> context,
       v8::Local<v8::Value> handle,
       JsRef<T>*,
       kj::Maybe<v8::Local<v8::Object>> parentObject) {
-    auto isolate = context->GetIsolate();
-    auto& js = Lock::from(isolate);
+    auto isolate = js.v8Isolate;
     KJ_IF_SOME(result,
-        TypeWrapper::from(isolate).tryUnwrap(context, handle, (T*)nullptr, parentObject)) {
+        TypeWrapper::from(isolate).tryUnwrap(js, context, handle, (T*)nullptr, parentObject)) {
       return JsRef(js, result);
     }
     return kj::none;
