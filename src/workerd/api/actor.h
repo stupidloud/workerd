@@ -155,7 +155,7 @@ class DurableObjectNamespace: public jsg::Object {
 
   struct NewUniqueIdOptions {
     // Restricts the new unique ID to a set of colos within a jurisdiction.
-    jsg::Optional<kj::String> jurisdiction;
+    jsg::Optional<kj::Maybe<kj::String>> jurisdiction;
 
     JSG_STRUCT(jurisdiction);
 
@@ -209,14 +209,14 @@ class DurableObjectNamespace: public jsg::Object {
 
   // Creates a subnamespace with the jurisdiction hardcoded.
   jsg::Ref<DurableObjectNamespace> jurisdiction(
-      jsg::Lock& js, jsg::Optional<kj::String> maybeJurisdiction);
+      jsg::Lock& js, jsg::Optional<kj::Maybe<kj::String>> maybeJurisdiction);
 
   JSG_RESOURCE_TYPE(DurableObjectNamespace, CompatibilityFlags::Reader flags) {
     JSG_METHOD(newUniqueId);
     JSG_METHOD(idFromName);
     JSG_METHOD(idFromString);
-    JSG_METHOD(getByName);
     JSG_METHOD(get);
+    JSG_METHOD(getByName);
     if (flags.getDurableObjectGetExisting()) {
       JSG_METHOD(getExisting);
     }
@@ -226,12 +226,14 @@ class DurableObjectNamespace: public jsg::Object {
     if (flags.getDurableObjectGetExisting()) {
       JSG_TS_OVERRIDE(<T extends Rpc.DurableObjectBranded | undefined = undefined> {
         get(id: DurableObjectId, options?: DurableObjectNamespaceGetDurableObjectOptions): DurableObjectStub<T>;
+        getByName(name: string, options?: DurableObjectNamespaceGetDurableObjectOptions): DurableObjectStub<T>;
         getExisting(id: DurableObjectId, options?: DurableObjectNamespaceGetDurableObjectOptions): DurableObjectStub<T>;
         jurisdiction(jurisdiction: DurableObjectJurisdiction): DurableObjectNamespace<T>;
       });
     } else {
       JSG_TS_OVERRIDE(<T extends Rpc.DurableObjectBranded | undefined = undefined> {
         get(id: DurableObjectId, options?: DurableObjectNamespaceGetDurableObjectOptions): DurableObjectStub<T>;
+        getByName(name: string, options?: DurableObjectNamespaceGetDurableObjectOptions): DurableObjectStub<T>;
         jurisdiction(jurisdiction: DurableObjectJurisdiction): DurableObjectNamespace<T>;
       });
     }
